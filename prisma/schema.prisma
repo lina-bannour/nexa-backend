@@ -1,0 +1,162 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  STUDENT
+  ADMIN
+}
+
+enum Filiere {
+  MP
+  PC
+  TSI
+  BIO
+  TECHNO
+}
+
+enum Matiere {
+  MATHEMATIQUES
+  PHYSIQUE
+  SCIENCES_INGENIEUR
+  AUTRE
+}
+
+enum Difficulte {
+  UN_ETOILE
+  DEUX_ETOILES
+  TROIS_ETOILES
+}
+
+model User {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  passwordHash String
+  nom          String
+  prenom       String
+  role         Role      @default(STUDENT)
+  ecole        String?
+  filiere      Filiere?
+  xpTotal      Int       @default(0)
+  attempts        ExerciseAttempt[]
+  contestSessions ContestSession[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@map("users")
+}
+
+model Exercise {
+  id                String     @id @default(uuid())
+  titre             String
+  matiere           Matiere
+  difficulte        Difficulte
+  enonce            String     @db.Text
+  hint1             String?    @db.Text
+  hint2             String?    @db.Text
+  hint3             String?    @db.Text
+  hint4             String?    @db.Text
+  solutionDetaillee String     @db.Text
+  xpBase            Int        @default(10)
+  choix    ExerciseChoice[]
+  attempts ExerciseAttempt[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@map("exercises")
+}
+
+model ExerciseChoice {
+  id         String   @id @default(uuid())
+  exerciseId String
+  exercise   Exercise @relation(fields: [exerciseId], references: [id], onDelete: Cascade)
+  label      String
+  isCorrect  Boolean  @default(false)
+  @@map("exercise_choices")
+}
+
+model ExerciseAttempt {
+  id               String   @id @default(uuid())
+  userId           String
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  exerciseId       String
+  exercise         Exercise @relation(fields: [exerciseId], references: [id], onDelete: Cascade)
+  selectedChoiceId String?
+  isCorrect        Boolean
+  hintsUsed        Int      @default(0)
+  xpEarned         Int      @default(0)
+  createdAt        DateTime @default(now())
+  @@map("exercise_attempts")
+}
+
+model Contest {
+  id      String   @id @default(uuid())
+  titre   String
+  annee   Int
+  filiere Filiere
+  matiere Matiere?
+  questions ContestQuestion[]
+  sessions  ContestSession[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@map("contests")
+}
+
+model ContestQuestion {
+  id                String  @id @default(uuid())
+  contestId         String
+  contest           Contest @relation(fields: [contestId], references: [id], onDelete: Cascade)
+  ordre             Int
+  enonce            String  @db.Text
+  hint1             String? @db.Text
+  hint2             String? @db.Text
+  hint3             String? @db.Text
+  hint4             String? @db.Text
+  solutionDetaillee String  @db.Text
+  xpBase            Int     @default(10)
+  choix   ContestQuestionChoice[]
+  answers ContestSessionAnswer[]
+  @@unique([contestId, ordre])
+  @@map("contest_questions")
+}
+
+model ContestQuestionChoice {
+  id         String          @id @default(uuid())
+  questionId String
+  question   ContestQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  label      String
+  isCorrect  Boolean         @default(false)
+  @@map("contest_question_choices")
+}
+
+model ContestSession {
+  id                 String   @id @default(uuid())
+  userId             String
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  contestId          String
+  contest            Contest  @relation(fields: [contestId], references: [id], onDelete: Cascade)
+  questionsCompleted Int      @default(0)
+  xpTotal            Int      @default(0)
+  isCompleted        Boolean  @default(false)
+  startedAt          DateTime @default(now())
+  completedAt        DateTime?
+  answers ContestSessionAnswer[]
+  @@map("contest_sessions")
+}
+
+model ContestSessionAnswer {
+  id               String         @id @default(uuid())
+  sessionId        String
+  session          ContestSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  questionId       String
+  question         ContestQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  selectedChoiceId String?
+  isCorrect        Boolean
+  hintsUsed        Int            @default(0)
+  xpEarned         Int            @default(0)
+  answeredAt       DateTime       @default(now())
+  @@unique([sessionId, questionId])
+  @@map("contest_session_answers")
+}
