@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { UpdateProfileDto } from './dto/update-profile.dto';
 
 @Injectable()
 export class UsersService {
@@ -19,6 +20,27 @@ export class UsersService {
         role: true,
         createdAt: true,
         _count: { select: { attempts: true } },
+      },
+    });
+  }
+
+  async updateProfile(userId: string, dto: UpdateProfileDto) {
+    return this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        ...(dto.ecole !== undefined && { ecole: dto.ecole }),
+        ...(dto.filiere !== undefined && { filiere: dto.filiere as any }),
+      },
+      select: {
+        id: true,
+        email: true,
+        nom: true,
+        prenom: true,
+        filiere: true,
+        ecole: true,
+        xpTotal: true,
+        role: true,
+        createdAt: true,
       },
     });
   }
