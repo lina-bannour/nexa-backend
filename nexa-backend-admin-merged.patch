@@ -1,0 +1,3024 @@
+From 552c1c53f29984779b69c7df7a7e84d2bc173f6b Mon Sep 17 00:00:00 2001
+From: Claude <claude@anthropic.com>
+Date: Sat, 18 Jul 2026 13:59:59 +0000
+Subject: [PATCH] fix: admin RBAC + auth/dashboard bug fixes, merged from two
+ independent reviews
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This combines two independent passes at securing/completing the admin backend,
+keeping whichever version of each piece was actually correct after diffing
+both against real main and running the full test suite against each change.
+
+Critical bugs fixed:
+- auth.service.ts referenced prisma.passwordResetToken, prisma.emailVerificationToken,
+  and user.emailVerified with none of them defined in schema.prisma — registration
+  and password reset were broken. Added the missing models/field.
+- Dashboard's raw SQL queried a snake_case created_at column that doesn't exist
+  (fields aren't @map'd, so Prisma generates camelCase createdAt) — the daily
+  activity and registrations charts would 500 against a real database.
+
+Security gap fixed (the original ask):
+- Every /admin/* controller, plus the admin-only routes on /exercises and
+  /contests, only checked JwtAuthGuard, not role. Added RolesGuard + @Roles.
+- Suspending/banning a user had no actual effect anywhere — JwtStrategy never
+  checked account status, and login() didn't either, so a banned user's
+  existing token (and even a fresh login) kept working. Now enforced on
+  login and re-checked on every authenticated request.
+- Admin accounts can no longer be suspended/banned via the status endpoint,
+  or have their own role changed via the new promotion endpoint (self-lockout
+  guard).
+
+New capability:
+- PATCH /admin/users/:id/role lets an existing admin promote another account
+  to ADMIN (or demote back to STUDENT) — previously the only way to get an
+  admin account at all was the seed script, with no way to add a second one.
+
+Data integrity fixed:
+- admin-content.controller.ts accepted untyped bodies for exercise/contest
+  updates. Added proper DTOs.
+- The contest-update DTO/service silently dropped question edits — a PUT to
+  /admin/content/contests/:id could change metadata but never touch the
+  actual questions. Restored, wrapped in a transaction alongside the
+  exercise-choice replacement so a partial failure can't leave an exercise
+  with zero answer choices.
+
+Coherence with backlog #12 (config should actually apply):
+- PlatformSettings (hint penalties, XP per forum post/reply) was stored but
+  never read anywhere. Wired into exercise/contest grading and forum
+  post/reply creation, with a defensive fallback so a settings-lookup hiccup
+  never blocks a submission.
+
+Also included:
+- prisma/seed.ts + prisma.config.ts seed hook to bootstrap the first admin
+  account, refusing to run without an explicit strong password rather than
+  falling back to a hardcoded default.
+- Test coverage for every admin service, plus new specs for the two pieces
+  that had none before (jwt.strategy's status enforcement, admin-users'
+  ban-protection and role-promotion guards). Full suite: 17/17 suites,
+  119/119 tests passing (verified against a local Prisma client stub, since
+  this sandbox can't reach Prisma's engine CDN to run a real generate).
+
+Note: still run 'npx prisma migrate dev' and 'npx prisma db seed' locally —
+this could not be verified against a real Postgres database from here.
+---
+ prisma.config.ts                              |   1 +
+ prisma/schema.prisma                          |  27 ++
+ prisma/seed.ts                                |  67 +++++
+ src/admin/content/admin-content.controller.ts |  14 +-
+ .../content/admin-content.service.spec.ts     | 250 ++++++++++++++++
+ src/admin/content/admin-content.service.ts    |  69 +++--
+ src/admin/content/dto/update-content.dto.ts   |  66 +++++
+ src/admin/dashboard/dashboard.controller.ts   |   5 +-
+ src/admin/dashboard/dashboard.service.spec.ts | 110 +++++++
+ src/admin/dashboard/dashboard.service.ts      |  12 +-
+ .../moderation/admin-moderation.controller.ts |  26 +-
+ .../admin-moderation.service.spec.ts          | 129 ++++++++
+ .../settings/admin-settings.controller.ts     |   9 +-
+ .../settings/admin-settings.service.spec.ts   | 142 +++++++++
+ src/admin/settings/admin-settings.service.ts  |  12 +-
+ .../users/admin-users.controller.spec.ts      |  70 +++++
+ src/admin/users/admin-users.controller.ts     |  32 +-
+ src/admin/users/admin-users.service.spec.ts   | 112 +++++++
+ src/admin/users/admin-users.service.ts        |  42 ++-
+ src/admin/users/dto/admin-user.dto.ts         |  27 +-
+ src/auth/auth.service.spec.ts                 |  54 +++-
+ src/auth/auth.service.ts                      |   7 +
+ src/auth/jwt.strategy.spec.ts                 |  56 ++++
+ src/auth/jwt.strategy.ts                      |  14 +-
+ src/auth/roles.decorator.ts                   |   4 +
+ src/auth/roles.guard.ts                       |  32 ++
+ src/contests/contests.controller.spec.ts      |  71 +++++
+ src/contests/contests.controller.ts           |  23 +-
+ src/contests/contests.service.spec.ts         | 276 +++++++++++++++++-
+ src/contests/contests.service.ts              |  75 ++++-
+ src/exercises/exercises.controller.spec.ts    |  66 +++++
+ src/exercises/exercises.controller.ts         |  12 +-
+ src/exercises/exercises.service.spec.ts       | 213 +++++++++++++-
+ src/exercises/exercises.service.ts            |  44 ++-
+ src/forum/forum.service.ts                    |  42 ++-
+ src/middleware/maintenance.middleware.spec.ts |  65 +++++
+ 36 files changed, 2175 insertions(+), 101 deletions(-)
+ create mode 100644 prisma/seed.ts
+ create mode 100644 src/admin/content/admin-content.service.spec.ts
+ create mode 100644 src/admin/content/dto/update-content.dto.ts
+ create mode 100644 src/admin/dashboard/dashboard.service.spec.ts
+ create mode 100644 src/admin/moderation/admin-moderation.service.spec.ts
+ create mode 100644 src/admin/settings/admin-settings.service.spec.ts
+ create mode 100644 src/admin/users/admin-users.controller.spec.ts
+ create mode 100644 src/admin/users/admin-users.service.spec.ts
+ create mode 100644 src/auth/jwt.strategy.spec.ts
+ create mode 100644 src/auth/roles.decorator.ts
+ create mode 100644 src/auth/roles.guard.ts
+ create mode 100644 src/middleware/maintenance.middleware.spec.ts
+
+diff --git a/prisma.config.ts b/prisma.config.ts
+index 831a20f..b912ece 100644
+--- a/prisma.config.ts
++++ b/prisma.config.ts
+@@ -7,6 +7,7 @@ export default defineConfig({
+   schema: "prisma/schema.prisma",
+   migrations: {
+     path: "prisma/migrations",
++    seed: "ts-node prisma/seed.ts",
+   },
+   datasource: {
+     url: process.env["DATABASE_URL"],
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index d22e29d..82d8737 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -53,6 +53,7 @@ model User {
+   prenom       String
+   role         Role       @default(STUDENT)
+   status       UserStatus @default(ACTIVE)
++  emailVerified Boolean   @default(false)
+   ecole        String?
+   filiere      Filiere?
+   xpTotal      Int        @default(0)
+@@ -63,6 +64,8 @@ model User {
+   posts           ForumPost[]
+   replies         ForumReply[]
+   likes           ForumLike[]
++  resetTokens        PasswordResetToken[]
++  verificationTokens EmailVerificationToken[]
+ 
+   createdAt DateTime @default(now())
+   updatedAt DateTime @updatedAt
+@@ -270,3 +273,27 @@ model PlatformSettings {
+ 
+   @@map("platform_settings")
+ }
++
++model PasswordResetToken {
++  id        String   @id @default(uuid())
++  userId    String
++  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
++  tokenHash String   @unique
++  used      Boolean  @default(false)
++  expiresAt DateTime
++  createdAt DateTime @default(now())
++
++  @@map("password_reset_tokens")
++}
++
++model EmailVerificationToken {
++  id        String   @id @default(uuid())
++  userId    String
++  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
++  tokenHash String   @unique
++  used      Boolean  @default(false)
++  expiresAt DateTime
++  createdAt DateTime @default(now())
++
++  @@map("email_verification_tokens")
++}
+diff --git a/prisma/seed.ts b/prisma/seed.ts
+new file mode 100644
+index 0000000..d2b3ce6
+--- /dev/null
++++ b/prisma/seed.ts
+@@ -0,0 +1,67 @@
++import 'dotenv/config';
++import { PrismaClient } from '@prisma/client';
++import { PrismaPg } from '@prisma/adapter-pg';
++import * as bcrypt from 'bcrypt';
++
++const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
++const prisma = new PrismaClient({ adapter });
++
++async function main() {
++  const email = process.env.ADMIN_EMAIL;
++  const password = process.env.ADMIN_PASSWORD;
++
++  if (!email || !password) {
++    console.error(
++      '✗ ADMIN_EMAIL et ADMIN_PASSWORD doivent être définis (dans .env ou en ligne de ' +
++        'commande) pour créer le premier compte admin.\n' +
++        '  Exemple : ADMIN_EMAIL=admin@nexa.tn ADMIN_PASSWORD=change-moi npx prisma db seed',
++    );
++    process.exit(1);
++  }
++
++  if (password.length < 8) {
++    console.error('✗ ADMIN_PASSWORD doit contenir au moins 8 caractères.');
++    process.exit(1);
++  }
++
++  const passwordHash = await bcrypt.hash(password, 10);
++
++  const existing = await prisma.user.findUnique({ where: { email } });
++
++  const admin = await prisma.user.upsert({
++    where: { email },
++    // If the account already exists, we only touch its role/verification
++    // status — we never silently overwrite an existing password here.
++    update: {
++      role: 'ADMIN',
++      status: 'ACTIVE',
++      emailVerified: true,
++    },
++    create: {
++      email,
++      passwordHash,
++      nom: process.env.ADMIN_NOM || 'Admin',
++      prenom: process.env.ADMIN_PRENOM || 'NEXA',
++      role: 'ADMIN',
++      status: 'ACTIVE',
++      emailVerified: true,
++    },
++    select: { id: true, email: true, role: true, createdAt: true },
++  });
++
++  if (existing) {
++    console.log(`✓ Utilisateur existant promu ADMIN : ${admin.email}`);
++    if (existing.role === 'ADMIN') {
++      console.log('  (était déjà admin — aucun changement de mot de passe)');
++    }
++  } else {
++    console.log(`✓ Compte admin créé : ${admin.email}`);
++  }
++}
++
++main()
++  .catch((e) => {
++    console.error('✗ Échec du seed :', e);
++    process.exit(1);
++  })
++  .finally(() => prisma.$disconnect());
+diff --git a/src/admin/content/admin-content.controller.ts b/src/admin/content/admin-content.controller.ts
+index 3c6ffaa..8bedbff 100644
+--- a/src/admin/content/admin-content.controller.ts
++++ b/src/admin/content/admin-content.controller.ts
+@@ -1,8 +1,12 @@
+ import { Controller, Get, Put, Delete, Param, Body, UseGuards } from '@nestjs/common';
+ import { AdminContentService } from './admin-content.service';
++import { UpdateExerciseDto, UpdateContestDto } from './dto/update-content.dto';
+ import { JwtAuthGuard } from '../../auth/jwt-auth.guard';
++import { RolesGuard } from '../../auth/roles.guard';
++import { Roles } from '../../auth/roles.decorator';
+ 
+-@UseGuards(JwtAuthGuard)
++@UseGuards(JwtAuthGuard, RolesGuard)
++@Roles('ADMIN')
+ @Controller('admin/content')
+ export class AdminContentController {
+   constructor(private readonly adminContentService: AdminContentService) {}
+@@ -12,8 +16,8 @@ export class AdminContentController {
+   listExercises() { return this.adminContentService.listExercises(); }
+ 
+   @Put('exercises/:id')
+-  updateExercise(@Param('id') id: string, @Body() body: any) {
+-    return this.adminContentService.updateExercise(id, body);
++  updateExercise(@Param('id') id: string, @Body() dto: UpdateExerciseDto) {
++    return this.adminContentService.updateExercise(id, dto);
+   }
+ 
+   @Delete('exercises/:id')
+@@ -26,8 +30,8 @@ export class AdminContentController {
+   listContests() { return this.adminContentService.listContests(); }
+ 
+   @Put('contests/:id')
+-  updateContest(@Param('id') id: string, @Body() body: any) {
+-    return this.adminContentService.updateContest(id, body);
++  updateContest(@Param('id') id: string, @Body() dto: UpdateContestDto) {
++    return this.adminContentService.updateContest(id, dto);
+   }
+ 
+   @Delete('contests/:id')
+diff --git a/src/admin/content/admin-content.service.spec.ts b/src/admin/content/admin-content.service.spec.ts
+new file mode 100644
+index 0000000..eb1e612
+--- /dev/null
++++ b/src/admin/content/admin-content.service.spec.ts
+@@ -0,0 +1,250 @@
++import { Test, TestingModule } from '@nestjs/testing';
++import { NotFoundException } from '@nestjs/common';
++import { AdminContentService } from './admin-content.service';
++import { PrismaService } from '../../prisma/prisma.service';
++
++describe('AdminContentService', () => {
++  let service: AdminContentService;
++  let prisma: {
++    exercise: {
++      findMany: jest.Mock;
++      findUnique: jest.Mock;
++      update: jest.Mock;
++      delete: jest.Mock;
++    };
++    exerciseChoice: { deleteMany: jest.Mock };
++    contest: {
++      findMany: jest.Mock;
++      findUnique: jest.Mock;
++      update: jest.Mock;
++      delete: jest.Mock;
++    };
++    contestQuestion: { deleteMany: jest.Mock };
++    $transaction: jest.Mock;
++  };
++
++  const exercise = {
++    id: 'ex-1',
++    titre: 'Limites',
++    matiere: 'MATHEMATIQUES',
++    difficulte: 'DEUX_ETOILES',
++    enonce: '...',
++  };
++
++  const contest = {
++    id: 'contest-1',
++    titre: 'Concours 2025',
++    annee: 2025,
++    filiere: 'MP',
++  };
++
++  beforeEach(async () => {
++    prisma = {
++      exercise: {
++        findMany: jest.fn(),
++        findUnique: jest.fn(),
++        update: jest.fn(),
++        delete: jest.fn(),
++      },
++      exerciseChoice: { deleteMany: jest.fn() },
++      contest: {
++        findMany: jest.fn(),
++        findUnique: jest.fn(),
++        update: jest.fn(),
++        delete: jest.fn(),
++      },
++      contestQuestion: { deleteMany: jest.fn() },
++      // $transaction runs the callback against the same mocked prisma object,
++      // matching how the real PrismaService's interactive transaction works.
++      $transaction: jest.fn((fn) => fn(prisma)),
++    };
++
++    const module: TestingModule = await Test.createTestingModule({
++      providers: [
++        AdminContentService,
++        { provide: PrismaService, useValue: prisma },
++      ],
++    }).compile();
++
++    service = module.get<AdminContentService>(AdminContentService);
++  });
++
++  it('should be defined', () => {
++    expect(service).toBeDefined();
++  });
++
++  // 10.1.3 / 10.2.3 — Tests de modification / suppression d'exercice
++  describe('updateExercise', () => {
++    it('throws NotFoundException for an unknown exercise', async () => {
++      prisma.exercise.findUnique.mockResolvedValue(null);
++
++      await expect(
++        service.updateExercise('missing', { titre: 'X' }),
++      ).rejects.toThrow(NotFoundException);
++    });
++
++    it('updates scalar fields without touching choices when none are provided', async () => {
++      prisma.exercise.findUnique.mockResolvedValue(exercise);
++      prisma.exercise.update.mockResolvedValue({
++        ...exercise,
++        titre: 'Limites et continuité',
++      });
++
++      await service.updateExercise('ex-1', { titre: 'Limites et continuité' });
++
++      expect(prisma.exerciseChoice.deleteMany).not.toHaveBeenCalled();
++      expect(prisma.exercise.update).toHaveBeenCalledWith(
++        expect.objectContaining({
++          where: { id: 'ex-1' },
++          data: expect.objectContaining({ titre: 'Limites et continuité' }),
++        }),
++      );
++    });
++
++    it('replaces all choices atomically when choix is provided', async () => {
++      prisma.exercise.findUnique.mockResolvedValue(exercise);
++      prisma.exercise.update.mockResolvedValue(exercise);
++
++      const choix = [
++        { label: 'A', isCorrect: false },
++        { label: 'B', isCorrect: true },
++      ];
++      await service.updateExercise('ex-1', { choix });
++
++      expect(prisma.$transaction).toHaveBeenCalled();
++      expect(prisma.exerciseChoice.deleteMany).toHaveBeenCalledWith({
++        where: { exerciseId: 'ex-1' },
++      });
++      // Choices are replaced via a nested create on the exercise update
++      // (not a separate createMany), so the delete + the nested write both
++      // happen inside the same transaction and can't leave the exercise
++      // with zero choices if one half fails.
++      expect(prisma.exercise.update).toHaveBeenCalledWith(
++        expect.objectContaining({
++          data: expect.objectContaining({ choix: { create: choix } }),
++        }),
++      );
++    });
++  });
++
++  describe('deleteExercise', () => {
++    it('throws NotFoundException for an unknown exercise', async () => {
++      prisma.exercise.findUnique.mockResolvedValue(null);
++
++      await expect(service.deleteExercise('missing')).rejects.toThrow(
++        NotFoundException,
++      );
++    });
++
++    it('deletes an existing exercise', async () => {
++      prisma.exercise.findUnique.mockResolvedValue(exercise);
++
++      const result = await service.deleteExercise('ex-1');
++
++      expect(prisma.exercise.delete).toHaveBeenCalledWith({
++        where: { id: 'ex-1' },
++      });
++      expect(result.message).toMatch(/deleted/i);
++    });
++  });
++
++  // 10.3.4 — Tests CRUD sur les sujets de concours
++  describe('updateContest', () => {
++    it('throws NotFoundException for an unknown contest', async () => {
++      prisma.contest.findUnique.mockResolvedValue(null);
++
++      await expect(
++        service.updateContest('missing', { titre: 'X' }),
++      ).rejects.toThrow(NotFoundException);
++    });
++
++    it('updates the contest fields without touching questions when none are provided', async () => {
++      prisma.contest.findUnique.mockResolvedValue(contest);
++      prisma.contest.update.mockResolvedValue({
++        ...contest,
++        titre: 'Concours 2026',
++      });
++
++      await service.updateContest('contest-1', {
++        titre: 'Concours 2026',
++        filiere: 'PC',
++      });
++
++      expect(prisma.contestQuestion.deleteMany).not.toHaveBeenCalled();
++      expect(prisma.contest.update).toHaveBeenCalledWith(
++        expect.objectContaining({
++          where: { id: 'contest-1' },
++          data: expect.objectContaining({
++            titre: 'Concours 2026',
++            filiere: 'PC',
++          }),
++        }),
++      );
++    });
++
++    // This is the one case the other implementation actually got wrong: its
++    // UpdateContestDto had no `questions` field at all, so a contest's
++    // questions could never be edited through this endpoint.
++    it('replaces the question set atomically when questions are provided', async () => {
++      prisma.contest.findUnique.mockResolvedValue(contest);
++      prisma.contest.update.mockResolvedValue(contest);
++
++      const questions = [
++        {
++          ordre: 1,
++          enonce: 'Calculez...',
++          solutionDetaillee: '...',
++          xpBase: 10,
++          choix: [
++            { label: 'A', isCorrect: true },
++            { label: 'B', isCorrect: false },
++          ],
++        },
++      ];
++      await service.updateContest('contest-1', { questions });
++
++      expect(prisma.$transaction).toHaveBeenCalled();
++      expect(prisma.contestQuestion.deleteMany).toHaveBeenCalledWith({
++        where: { contestId: 'contest-1' },
++      });
++      expect(prisma.contest.update).toHaveBeenCalledWith(
++        expect.objectContaining({
++          data: expect.objectContaining({
++            questions: {
++              create: [
++                {
++                  ordre: 1,
++                  enonce: 'Calculez...',
++                  solutionDetaillee: '...',
++                  xpBase: 10,
++                  choix: { create: questions[0].choix },
++                },
++              ],
++            },
++          }),
++        }),
++      );
++    });
++  });
++
++  describe('deleteContest', () => {
++    it('throws NotFoundException for an unknown contest', async () => {
++      prisma.contest.findUnique.mockResolvedValue(null);
++
++      await expect(service.deleteContest('missing')).rejects.toThrow(
++        NotFoundException,
++      );
++    });
++
++    it('deletes an existing contest', async () => {
++      prisma.contest.findUnique.mockResolvedValue(contest);
++
++      const result = await service.deleteContest('contest-1');
++
++      expect(prisma.contest.delete).toHaveBeenCalledWith({
++        where: { id: 'contest-1' },
++      });
++      expect(result.message).toMatch(/deleted/i);
++    });
++  });
++});
+diff --git a/src/admin/content/admin-content.service.ts b/src/admin/content/admin-content.service.ts
+index fb1ff5a..b5ffa56 100644
+--- a/src/admin/content/admin-content.service.ts
++++ b/src/admin/content/admin-content.service.ts
+@@ -1,5 +1,6 @@
+ import { Injectable, NotFoundException } from '@nestjs/common';
+ import { PrismaService } from '../../prisma/prisma.service';
++import { UpdateExerciseDto, UpdateContestDto } from './dto/update-content.dto';
+ 
+ @Injectable()
+ export class AdminContentService {
+@@ -14,27 +15,27 @@ export class AdminContentService {
+     });
+   }
+ 
+-  async updateExercise(id: string, data: any) {
+-    const { choix, ...exerciseData } = data;
++  async updateExercise(id: string, dto: UpdateExerciseDto) {
++    const { choix, ...exerciseData } = dto;
+     const existing = await this.prisma.exercise.findUnique({ where: { id } });
+     if (!existing) throw new NotFoundException('Exercise not found');
+ 
+-    if (choix) {
+-      // Delete existing choices and recreate
+-      await this.prisma.exerciseChoice.deleteMany({ where: { exerciseId: id } });
+-      await this.prisma.exerciseChoice.createMany({
+-        data: choix.map((c: any) => ({ ...c, exerciseId: id })),
++    return this.prisma.$transaction(async (tx) => {
++      if (choix) {
++        // Replace choices atomically with the exercise update so a failed
++        // write can't leave the exercise with no choices attached.
++        await tx.exerciseChoice.deleteMany({ where: { exerciseId: id } });
++      }
++      return tx.exercise.update({
++        where: { id },
++        data: {
++          ...exerciseData,
++          ...(exerciseData.matiere && { matiere: exerciseData.matiere as any }),
++          ...(exerciseData.difficulte && { difficulte: exerciseData.difficulte as any }),
++          ...(choix && { choix: { create: choix } }),
++        },
++        include: { choix: true },
+       });
+-    }
+-
+-    return this.prisma.exercise.update({
+-      where: { id },
+-      data: {
+-        ...exerciseData,
+-        ...(exerciseData.matiere && { matiere: exerciseData.matiere as any }),
+-        ...(exerciseData.difficulte && { difficulte: exerciseData.difficulte as any }),
+-      },
+-      include: { choix: true },
+     });
+   }
+ 
+@@ -54,17 +55,33 @@ export class AdminContentService {
+     });
+   }
+ 
+-  async updateContest(id: string, data: any) {
++  async updateContest(id: string, dto: UpdateContestDto) {
+     const existing = await this.prisma.contest.findUnique({ where: { id } });
+     if (!existing) throw new NotFoundException('Contest not found');
+-    const { questions, ...contestData } = data;
+-    return this.prisma.contest.update({
+-      where: { id },
+-      data: {
+-        ...contestData,
+-        ...(contestData.filiere && { filiere: contestData.filiere as any }),
+-        ...(contestData.matiere && { matiere: contestData.matiere as any }),
+-      },
++    const { questions, ...contestData } = dto;
++
++    return this.prisma.$transaction(async (tx) => {
++      if (questions) {
++        // Replace the question set atomically with the rest of the update.
++        await tx.contestQuestion.deleteMany({ where: { contestId: id } });
++      }
++      return tx.contest.update({
++        where: { id },
++        data: {
++          ...contestData,
++          ...(contestData.filiere && { filiere: contestData.filiere as any }),
++          ...(contestData.matiere && { matiere: contestData.matiere as any }),
++          ...(questions && {
++            questions: {
++              create: questions.map(({ choix, ...q }) => ({
++                ...q,
++                choix: { create: choix },
++              })),
++            },
++          }),
++        },
++        include: { questions: { include: { choix: true } } },
++      });
+     });
+   }
+ 
+diff --git a/src/admin/content/dto/update-content.dto.ts b/src/admin/content/dto/update-content.dto.ts
+new file mode 100644
+index 0000000..7733b4b
+--- /dev/null
++++ b/src/admin/content/dto/update-content.dto.ts
+@@ -0,0 +1,66 @@
++import {
++  IsString,
++  IsNotEmpty,
++  IsIn,
++  IsInt,
++  Min,
++  IsOptional,
++  IsArray,
++  ValidateNested,
++  IsBoolean,
++} from 'class-validator';
++import { Type } from 'class-transformer';
++
++export class UpdateChoiceDto {
++  @IsString()
++  @IsNotEmpty()
++  label: string;
++
++  @IsBoolean()
++  isCorrect: boolean;
++}
++
++export class UpdateExerciseDto {
++  @IsOptional() @IsString() @IsNotEmpty() titre?: string;
++  @IsOptional() @IsIn(['MATHEMATIQUES', 'PHYSIQUE', 'SCIENCES_INGENIEUR', 'AUTRE']) matiere?: string;
++  @IsOptional() @IsIn(['UN_ETOILE', 'DEUX_ETOILES', 'TROIS_ETOILES']) difficulte?: string;
++  @IsOptional() @IsString() @IsNotEmpty() enonce?: string;
++  @IsOptional() @IsString() @IsNotEmpty() solutionDetaillee?: string;
++  @IsOptional() @IsInt() @Min(1) xpBase?: number;
++  @IsOptional() @IsString() hint1?: string;
++  @IsOptional() @IsString() hint2?: string;
++  @IsOptional() @IsString() hint3?: string;
++  @IsOptional() @IsString() hint4?: string;
++  // When provided, replaces all existing choices for this exercise.
++  @IsOptional()
++  @IsArray()
++  @ValidateNested({ each: true })
++  @Type(() => UpdateChoiceDto)
++  choix?: UpdateChoiceDto[];
++}
++
++export class UpdateContestQuestionDto {
++  @IsInt() @Min(1) ordre: number;
++  @IsString() @IsNotEmpty() enonce: string;
++  @IsString() @IsNotEmpty() solutionDetaillee: string;
++  @IsInt() @Min(1) xpBase: number;
++  @IsOptional() @IsString() hint1?: string;
++  @IsOptional() @IsString() hint2?: string;
++  @IsOptional() @IsString() hint3?: string;
++  @IsOptional() @IsString() hint4?: string;
++  @IsArray() @ValidateNested({ each: true }) @Type(() => UpdateChoiceDto)
++  choix: UpdateChoiceDto[];
++}
++
++export class UpdateContestDto {
++  @IsOptional() @IsString() @IsNotEmpty() titre?: string;
++  @IsOptional() @IsInt() annee?: number;
++  @IsOptional() @IsIn(['MP', 'PC', 'TSI', 'BIO', 'TECHNO']) filiere?: string;
++  @IsOptional() @IsIn(['MATHEMATIQUES', 'PHYSIQUE', 'SCIENCES_INGENIEUR', 'AUTRE']) matiere?: string;
++  // When provided, replaces the entire question set for this contest.
++  @IsOptional()
++  @IsArray()
++  @ValidateNested({ each: true })
++  @Type(() => UpdateContestQuestionDto)
++  questions?: UpdateContestQuestionDto[];
++}
+diff --git a/src/admin/dashboard/dashboard.controller.ts b/src/admin/dashboard/dashboard.controller.ts
+index 3e404c0..b7d067c 100644
+--- a/src/admin/dashboard/dashboard.controller.ts
++++ b/src/admin/dashboard/dashboard.controller.ts
+@@ -1,8 +1,11 @@
+ import { Controller, Get, UseGuards } from '@nestjs/common';
+ import { DashboardService } from './dashboard.service';
+ import { JwtAuthGuard } from '../../auth/jwt-auth.guard';
++import { RolesGuard } from '../../auth/roles.guard';
++import { Roles } from '../../auth/roles.decorator';
+ 
+-@UseGuards(JwtAuthGuard)
++@UseGuards(JwtAuthGuard, RolesGuard)
++@Roles('ADMIN')
+ @Controller('admin/dashboard')
+ export class DashboardController {
+   constructor(private readonly dashboardService: DashboardService) {}
+diff --git a/src/admin/dashboard/dashboard.service.spec.ts b/src/admin/dashboard/dashboard.service.spec.ts
+new file mode 100644
+index 0000000..2711cc6
+--- /dev/null
++++ b/src/admin/dashboard/dashboard.service.spec.ts
+@@ -0,0 +1,110 @@
++import { Test, TestingModule } from '@nestjs/testing';
++import { DashboardService } from './dashboard.service';
++import { PrismaService } from '../../prisma/prisma.service';
++
++describe('DashboardService', () => {
++  let service: DashboardService;
++  let prisma: {
++    user: { count: jest.Mock; groupBy: jest.Mock };
++    exercise: { count: jest.Mock };
++    contest: { count: jest.Mock };
++    exerciseAttempt: { aggregate: jest.Mock; count: jest.Mock };
++    $queryRaw: jest.Mock;
++  };
++
++  beforeEach(async () => {
++    prisma = {
++      user: { count: jest.fn(), groupBy: jest.fn() },
++      exercise: { count: jest.fn() },
++      contest: { count: jest.fn() },
++      exerciseAttempt: { aggregate: jest.fn(), count: jest.fn() },
++      $queryRaw: jest.fn(),
++    };
++
++    const module: TestingModule = await Test.createTestingModule({
++      providers: [
++        DashboardService,
++        { provide: PrismaService, useValue: prisma },
++      ],
++    }).compile();
++
++    service = module.get<DashboardService>(DashboardService);
++  });
++
++  it('should be defined', () => {
++    expect(service).toBeDefined();
++  });
++
++  // 8.1.6 — Tests du dashboard et des graphiques
++  describe('getStats', () => {
++    it('assembles KPIs, filière breakdown, and activity charts', async () => {
++      prisma.user.count.mockResolvedValueOnce(120).mockResolvedValueOnce(80); // total, active
++      prisma.exercise.count.mockResolvedValue(45);
++      prisma.contest.count.mockResolvedValue(6);
++      prisma.exerciseAttempt.aggregate.mockResolvedValue({
++        _sum: { xpEarned: 340 },
++      });
++      prisma.exerciseAttempt.count.mockResolvedValue(212);
++      prisma.user.groupBy.mockResolvedValue([
++        { filiere: 'MP', _count: { filiere: 50 } },
++        { filiere: 'PC', _count: { filiere: 30 } },
++      ]);
++      prisma.$queryRaw
++        .mockResolvedValueOnce([{ date: '2026-07-10', count: 12 }]) // dailyActivity
++        .mockResolvedValueOnce([{ date: '2026-07-10', count: 3 }]); // recentRegistrations
++
++      const result = await service.getStats();
++
++      expect(result.kpis).toEqual({
++        totalStudents: 120,
++        activeStudents: 80,
++        totalExercises: 45,
++        totalContests: 6,
++        xpToday: 340,
++        exercisesThisWeek: 212,
++      });
++      expect(result.studentsByFiliere).toEqual([
++        { filiere: 'MP', count: 50 },
++        { filiere: 'PC', count: 30 },
++      ]);
++      expect(result.dailyActivity).toEqual([{ date: '2026-07-10', count: 12 }]);
++      expect(result.recentRegistrations).toEqual([
++        { date: '2026-07-10', count: 3 },
++      ]);
++    });
++
++    it('defaults xpToday to 0 when there is no XP-earning activity yet', async () => {
++      prisma.user.count.mockResolvedValueOnce(0).mockResolvedValueOnce(0);
++      prisma.exercise.count.mockResolvedValue(0);
++      prisma.contest.count.mockResolvedValue(0);
++      prisma.exerciseAttempt.aggregate.mockResolvedValue({
++        _sum: { xpEarned: null },
++      });
++      prisma.exerciseAttempt.count.mockResolvedValue(0);
++      prisma.user.groupBy.mockResolvedValue([]);
++      prisma.$queryRaw.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
++
++      const result = await service.getStats();
++
++      expect(result.kpis.xpToday).toBe(0);
++    });
++
++    it('counts a student as active only if they have at least one exercise attempt', async () => {
++      prisma.user.count.mockResolvedValueOnce(120).mockResolvedValueOnce(80);
++      prisma.exercise.count.mockResolvedValue(45);
++      prisma.contest.count.mockResolvedValue(6);
++      prisma.exerciseAttempt.aggregate.mockResolvedValue({
++        _sum: { xpEarned: 0 },
++      });
++      prisma.exerciseAttempt.count.mockResolvedValue(0);
++      prisma.user.groupBy.mockResolvedValue([]);
++      prisma.$queryRaw.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
++
++      await service.getStats();
++
++      expect(prisma.user.count).toHaveBeenNthCalledWith(2, {
++        where: { role: 'STUDENT', attempts: { some: {} } },
++      });
++    });
++  });
++});
+diff --git a/src/admin/dashboard/dashboard.service.ts b/src/admin/dashboard/dashboard.service.ts
+index b34b57c..cf936ca 100644
+--- a/src/admin/dashboard/dashboard.service.ts
++++ b/src/admin/dashboard/dashboard.service.ts
+@@ -56,19 +56,19 @@ export class DashboardService {
+ 
+       // Daily activity last 7 days
+       this.prisma.$queryRaw<{ date: string; count: number }[]>`
+-        SELECT DATE(created_at) as date, COUNT(*) as count
++        SELECT DATE("createdAt") as date, COUNT(*) as count
+         FROM exercise_attempts
+-        WHERE created_at >= NOW() - INTERVAL '7 days'
+-        GROUP BY DATE(created_at)
++        WHERE "createdAt" >= NOW() - INTERVAL '7 days'
++        GROUP BY DATE("createdAt")
+         ORDER BY date ASC
+       `,
+ 
+       // Registrations last 7 days
+       this.prisma.$queryRaw<{ date: string; count: number }[]>`
+-        SELECT DATE(created_at) as date, COUNT(*) as count
++        SELECT DATE("createdAt") as date, COUNT(*) as count
+         FROM users
+-        WHERE role = 'STUDENT' AND created_at >= NOW() - INTERVAL '7 days'
+-        GROUP BY DATE(created_at)
++        WHERE role = 'STUDENT' AND "createdAt" >= NOW() - INTERVAL '7 days'
++        GROUP BY DATE("createdAt")
+         ORDER BY date ASC
+       `,
+     ]);
+diff --git a/src/admin/moderation/admin-moderation.controller.ts b/src/admin/moderation/admin-moderation.controller.ts
+index db0b7e1..132f57e 100644
+--- a/src/admin/moderation/admin-moderation.controller.ts
++++ b/src/admin/moderation/admin-moderation.controller.ts
+@@ -1,25 +1,37 @@
+ import { Controller, Get, Patch, Param, Body, UseGuards } from '@nestjs/common';
++import { IsIn } from 'class-validator';
+ import { AdminModerationService } from './admin-moderation.service';
+ import { JwtAuthGuard } from '../../auth/jwt-auth.guard';
+-import { IsIn } from 'class-validator';
++import { RolesGuard } from '../../auth/roles.guard';
++import { Roles } from '../../auth/roles.decorator';
+ 
+ class UpdatePostStatusDto {
+-  @IsIn(['PUBLISHED', 'REMOVED']) status: 'PUBLISHED' | 'REMOVED';
++  @IsIn(['PUBLISHED', 'REMOVED'])
++  status: 'PUBLISHED' | 'REMOVED';
+ }
+ 
+-@UseGuards(JwtAuthGuard)
++@UseGuards(JwtAuthGuard, RolesGuard)
++@Roles('ADMIN')
+ @Controller('admin/moderation')
+ export class AdminModerationController {
+-  constructor(private readonly adminModerationService: AdminModerationService) {}
++  constructor(
++    private readonly adminModerationService: AdminModerationService,
++  ) {}
+ 
+   @Get('stats')
+-  getForumStats() { return this.adminModerationService.getForumStats(); }
++  getForumStats() {
++    return this.adminModerationService.getForumStats();
++  }
+ 
+   @Get('reported')
+-  getReportedPosts() { return this.adminModerationService.getReportedPosts(); }
++  getReportedPosts() {
++    return this.adminModerationService.getReportedPosts();
++  }
+ 
+   @Get('posts')
+-  getAllPosts() { return this.adminModerationService.getAllPosts(); }
++  getAllPosts() {
++    return this.adminModerationService.getAllPosts();
++  }
+ 
+   @Patch('posts/:id/status')
+   updatePostStatus(@Param('id') id: string, @Body() dto: UpdatePostStatusDto) {
+diff --git a/src/admin/moderation/admin-moderation.service.spec.ts b/src/admin/moderation/admin-moderation.service.spec.ts
+new file mode 100644
+index 0000000..1864ae3
+--- /dev/null
++++ b/src/admin/moderation/admin-moderation.service.spec.ts
+@@ -0,0 +1,129 @@
++import { Test, TestingModule } from '@nestjs/testing';
++import { NotFoundException } from '@nestjs/common';
++import { AdminModerationService } from './admin-moderation.service';
++import { PrismaService } from '../../prisma/prisma.service';
++
++describe('AdminModerationService', () => {
++  let service: AdminModerationService;
++  let prisma: {
++    forumPost: {
++      count: jest.Mock;
++      findMany: jest.Mock;
++      findUnique: jest.Mock;
++      update: jest.Mock;
++    };
++    forumLike: { count: jest.Mock };
++  };
++
++  const reportedPost = {
++    id: 'post-1',
++    titre: 'Signalé',
++    status: 'REPORTED',
++    author: {
++      id: 'user-1',
++      nom: 'Bannour',
++      prenom: 'Lina',
++      email: 'lina@nexa.tn',
++    },
++    _count: { likes: 2, replies: 1 },
++  };
++
++  beforeEach(async () => {
++    prisma = {
++      forumPost: {
++        count: jest.fn(),
++        findMany: jest.fn(),
++        findUnique: jest.fn(),
++        update: jest.fn(),
++      },
++      forumLike: { count: jest.fn() },
++    };
++
++    const module: TestingModule = await Test.createTestingModule({
++      providers: [
++        AdminModerationService,
++        { provide: PrismaService, useValue: prisma },
++      ],
++    }).compile();
++
++    service = module.get<AdminModerationService>(AdminModerationService);
++  });
++
++  it('should be defined', () => {
++    expect(service).toBeDefined();
++  });
++
++  describe('getForumStats', () => {
++    it('aggregates counts by status plus total likes', async () => {
++      prisma.forumPost.count
++        .mockResolvedValueOnce(10) // total
++        .mockResolvedValueOnce(7) // published
++        .mockResolvedValueOnce(2) // reported
++        .mockResolvedValueOnce(1); // removed
++      prisma.forumLike.count.mockResolvedValue(42);
++
++      const result = await service.getForumStats();
++
++      expect(result).toEqual({
++        total: 10,
++        published: 7,
++        reported: 2,
++        removed: 1,
++        totalLikes: 42,
++      });
++    });
++  });
++
++  // 11.1.3 — Tests de la liste des posts signalés
++  describe('getReportedPosts', () => {
++    it('only fetches posts with REPORTED status', async () => {
++      prisma.forumPost.findMany.mockResolvedValue([reportedPost]);
++
++      const result = await service.getReportedPosts();
++
++      expect(prisma.forumPost.findMany).toHaveBeenCalledWith(
++        expect.objectContaining({ where: { status: 'REPORTED' } }),
++      );
++      expect(result).toEqual([reportedPost]);
++    });
++  });
++
++  // 11.2.3 — Tests des actions de modération (validation, suppression)
++  describe('updatePostStatus', () => {
++    it('throws NotFoundException for an unknown post', async () => {
++      prisma.forumPost.findUnique.mockResolvedValue(null);
++
++      await expect(
++        service.updatePostStatus('missing', 'REMOVED'),
++      ).rejects.toThrow(NotFoundException);
++    });
++
++    it('validates a reported post back to PUBLISHED', async () => {
++      prisma.forumPost.findUnique.mockResolvedValue(reportedPost);
++      prisma.forumPost.update.mockResolvedValue({
++        ...reportedPost,
++        status: 'PUBLISHED',
++      });
++
++      const result = await service.updatePostStatus('post-1', 'PUBLISHED');
++
++      expect(prisma.forumPost.update).toHaveBeenCalledWith({
++        where: { id: 'post-1' },
++        data: { status: 'PUBLISHED' },
++      });
++      expect(result.status).toBe('PUBLISHED');
++    });
++
++    it('removes a reported post', async () => {
++      prisma.forumPost.findUnique.mockResolvedValue(reportedPost);
++      prisma.forumPost.update.mockResolvedValue({
++        ...reportedPost,
++        status: 'REMOVED',
++      });
++
++      const result = await service.updatePostStatus('post-1', 'REMOVED');
++
++      expect(result.status).toBe('REMOVED');
++    });
++  });
++});
+diff --git a/src/admin/settings/admin-settings.controller.ts b/src/admin/settings/admin-settings.controller.ts
+index f6130e6..c6caeab 100644
+--- a/src/admin/settings/admin-settings.controller.ts
++++ b/src/admin/settings/admin-settings.controller.ts
+@@ -2,14 +2,19 @@ import { Controller, Get, Put, Patch, Body, UseGuards } from '@nestjs/common';
+ import { AdminSettingsService } from './admin-settings.service';
+ import { UpdateSettingsDto, UpdateMaintenanceDto } from './dto/settings.dto';
+ import { JwtAuthGuard } from '../../auth/jwt-auth.guard';
++import { RolesGuard } from '../../auth/roles.guard';
++import { Roles } from '../../auth/roles.decorator';
+ 
+-@UseGuards(JwtAuthGuard)
++@UseGuards(JwtAuthGuard, RolesGuard)
++@Roles('ADMIN')
+ @Controller('admin/settings')
+ export class AdminSettingsController {
+   constructor(private readonly adminSettingsService: AdminSettingsService) {}
+ 
+   @Get()
+-  getSettings() { return this.adminSettingsService.getSettings(); }
++  getSettings() {
++    return this.adminSettingsService.getSettings();
++  }
+ 
+   @Put()
+   updateSettings(@Body() dto: UpdateSettingsDto) {
+diff --git a/src/admin/settings/admin-settings.service.spec.ts b/src/admin/settings/admin-settings.service.spec.ts
+new file mode 100644
+index 0000000..fecc5d0
+--- /dev/null
++++ b/src/admin/settings/admin-settings.service.spec.ts
+@@ -0,0 +1,142 @@
++import { Test, TestingModule } from '@nestjs/testing';
++import { AdminSettingsService } from './admin-settings.service';
++import { PrismaService } from '../../prisma/prisma.service';
++
++describe('AdminSettingsService', () => {
++  let service: AdminSettingsService;
++  let prisma: {
++    platformSettings: { upsert: jest.Mock; findUnique: jest.Mock };
++  };
++
++  const settings = {
++    id: 1,
++    platformName: 'NEXA',
++    supportEmail: 'support@nexa.tn',
++    websiteUrl: 'https://nexa.tn',
++    xpPerDirectAnswer: 10,
++    xpPerForumPost: 3,
++    xpPerForumReply: 1,
++    hintPenaltyPercent1: 10,
++    hintPenaltyPercent2: 20,
++    hintPenaltyPercent3: 30,
++    hintPenaltyPercent4: 40,
++    maintenanceMode: false,
++  };
++
++  beforeEach(async () => {
++    prisma = {
++      platformSettings: { upsert: jest.fn(), findUnique: jest.fn() },
++    };
++
++    const module: TestingModule = await Test.createTestingModule({
++      providers: [
++        AdminSettingsService,
++        { provide: PrismaService, useValue: prisma },
++      ],
++    }).compile();
++
++    service = module.get<AdminSettingsService>(AdminSettingsService);
++  });
++
++  it('should be defined', () => {
++    expect(service).toBeDefined();
++  });
++
++  describe('getSettings', () => {
++    it('gets-or-creates the single settings row (id: 1)', async () => {
++      prisma.platformSettings.upsert.mockResolvedValue(settings);
++
++      const result = await service.getSettings();
++
++      expect(prisma.platformSettings.upsert).toHaveBeenCalledWith({
++        where: { id: 1 },
++        update: {},
++        create: { id: 1 },
++      });
++      expect(result).toEqual(settings);
++    });
++  });
++
++  // 12.1.3 — Tests de la mise à jour des paramètres généraux
++  describe('updateSettings — general params', () => {
++    it('updates the platform name / support email / website url', async () => {
++      prisma.platformSettings.upsert.mockResolvedValue({
++        ...settings,
++        platformName: 'NEXA Prépa',
++      });
++
++      await service.updateSettings({ platformName: 'NEXA Prépa' });
++
++      expect(prisma.platformSettings.upsert).toHaveBeenCalledWith({
++        where: { id: 1 },
++        update: { platformName: 'NEXA Prépa' },
++        create: { id: 1, platformName: 'NEXA Prépa' },
++      });
++    });
++  });
++
++  // 12.2.3 — Tests de la configuration de gamification
++  describe('updateSettings — gamification params', () => {
++    it('updates XP and hint-penalty values', async () => {
++      prisma.platformSettings.upsert.mockResolvedValue({
++        ...settings,
++        xpPerDirectAnswer: 15,
++        hintPenaltyPercent1: 5,
++      });
++
++      await service.updateSettings({
++        xpPerDirectAnswer: 15,
++        hintPenaltyPercent1: 5,
++      });
++
++      expect(prisma.platformSettings.upsert).toHaveBeenCalledWith(
++        expect.objectContaining({
++          update: { xpPerDirectAnswer: 15, hintPenaltyPercent1: 5 },
++        }),
++      );
++    });
++  });
++
++  // 12.3.4 — Tests du mode maintenance
++  describe('updateMaintenance', () => {
++    it('turns maintenance mode on', async () => {
++      prisma.platformSettings.upsert.mockResolvedValue({
++        ...settings,
++        maintenanceMode: true,
++      });
++
++      const result = await service.updateMaintenance({ maintenanceMode: true });
++
++      expect(prisma.platformSettings.upsert).toHaveBeenCalledWith({
++        where: { id: 1 },
++        update: { maintenanceMode: true },
++        create: { id: 1, maintenanceMode: true },
++      });
++      expect(result.maintenanceMode).toBe(true);
++    });
++  });
++
++  describe('isMaintenanceMode', () => {
++    it('returns true when maintenance mode is on', async () => {
++      prisma.platformSettings.findUnique.mockResolvedValue({
++        maintenanceMode: true,
++      });
++
++      await expect(service.isMaintenanceMode()).resolves.toBe(true);
++    });
++
++    it('returns false when the settings row does not exist yet', async () => {
++      prisma.platformSettings.findUnique.mockResolvedValue(null);
++
++      await expect(service.isMaintenanceMode()).resolves.toBe(false);
++    });
++
++    it('fails open (returns false) if the database call throws', async () => {
++      prisma.platformSettings.findUnique.mockRejectedValue(
++        new Error('DB unreachable'),
++      );
++
++      await expect(service.isMaintenanceMode()).resolves.toBe(false);
++    });
++  });
++});
+diff --git a/src/admin/settings/admin-settings.service.ts b/src/admin/settings/admin-settings.service.ts
+index 0828244..e95a65d 100644
+--- a/src/admin/settings/admin-settings.service.ts
++++ b/src/admin/settings/admin-settings.service.ts
+@@ -7,13 +7,12 @@ export class AdminSettingsService {
+   constructor(private prisma: PrismaService) {}
+ 
+   async getSettings() {
+-    // Get or create single-row settings
+-    const settings = await this.prisma.platformSettings.upsert({
++    // Get or create the single settings row.
++    return this.prisma.platformSettings.upsert({
+       where: { id: 1 },
+       update: {},
+       create: { id: 1 },
+     });
+-    return settings;
+   }
+ 
+   async updateSettings(dto: UpdateSettingsDto) {
+@@ -32,10 +31,13 @@ export class AdminSettingsService {
+     });
+   }
+ 
+-  // Used by maintenance middleware
++  // Used by MaintenanceMiddleware — must never throw (fails open if the
++  // settings row/table isn't reachable yet, e.g. right after a fresh migration).
+   async isMaintenanceMode(): Promise<boolean> {
+     try {
+-      const settings = await this.prisma.platformSettings.findUnique({ where: { id: 1 } });
++      const settings = await this.prisma.platformSettings.findUnique({
++        where: { id: 1 },
++      });
+       return settings?.maintenanceMode ?? false;
+     } catch {
+       return false;
+diff --git a/src/admin/users/admin-users.controller.spec.ts b/src/admin/users/admin-users.controller.spec.ts
+new file mode 100644
+index 0000000..66d0ae1
+--- /dev/null
++++ b/src/admin/users/admin-users.controller.spec.ts
+@@ -0,0 +1,70 @@
++import { Test, TestingModule } from '@nestjs/testing';
++import { AdminUsersController } from './admin-users.controller';
++import { AdminUsersService } from './admin-users.service';
++
++describe('AdminUsersController', () => {
++  let controller: AdminUsersController;
++  let service: {
++    findAll: jest.Mock;
++    findOne: jest.Mock;
++    update: jest.Mock;
++    updateStatus: jest.Mock;
++    updateRole: jest.Mock;
++  };
++
++  const req = { user: { userId: 'admin-1', role: 'ADMIN' } };
++
++  beforeEach(async () => {
++    service = {
++      findAll: jest.fn(),
++      findOne: jest.fn(),
++      update: jest.fn(),
++      updateStatus: jest.fn(),
++      updateRole: jest.fn(),
++    };
++
++    const module: TestingModule = await Test.createTestingModule({
++      controllers: [AdminUsersController],
++      providers: [{ provide: AdminUsersService, useValue: service }],
++    }).compile();
++
++    controller = module.get<AdminUsersController>(AdminUsersController);
++  });
++
++  it('should be defined', () => {
++    expect(controller).toBeDefined();
++  });
++
++  it('findAll forwards search/status/ecole query params', async () => {
++    service.findAll.mockResolvedValue([]);
++
++    await controller.findAll('lina', 'ACTIVE', 'IPEIT');
++
++    expect(service.findAll).toHaveBeenCalledWith('lina', 'ACTIVE', 'IPEIT');
++  });
++
++  it('updateRole passes the requesting admin id for the self-demotion check', async () => {
++    service.updateRole.mockResolvedValue({ id: 'user-1', role: 'ADMIN' });
++
++    const result = await controller.updateRole(
++      'user-1',
++      { role: 'ADMIN' },
++      req,
++    );
++
++    expect(service.updateRole).toHaveBeenCalledWith('user-1', 'admin-1', {
++      role: 'ADMIN',
++    });
++    expect(result).toEqual({ id: 'user-1', role: 'ADMIN' });
++  });
++
++  it('updateStatus delegates to the service', async () => {
++    service.updateStatus.mockResolvedValue({ id: 'user-1', status: 'BANNED' });
++
++    await controller.updateStatus('user-1', { status: 'BANNED' });
++
++    expect(service.updateStatus).toHaveBeenCalledWith('user-1', {
++      status: 'BANNED',
++    });
++  });
++});
+diff --git a/src/admin/users/admin-users.controller.ts b/src/admin/users/admin-users.controller.ts
+index 1685212..47eae90 100644
+--- a/src/admin/users/admin-users.controller.ts
++++ b/src/admin/users/admin-users.controller.ts
+@@ -1,9 +1,26 @@
+-import { Controller, Get, Put, Patch, Param, Body, Query, UseGuards } from '@nestjs/common';
++import {
++  Controller,
++  Get,
++  Put,
++  Patch,
++  Param,
++  Body,
++  Query,
++  UseGuards,
++  Request,
++} from '@nestjs/common';
+ import { AdminUsersService } from './admin-users.service';
+-import { UpdateUserDto, UpdateUserStatusDto } from './dto/admin-user.dto';
++import {
++  UpdateUserDto,
++  UpdateUserStatusDto,
++  UpdateUserRoleDto,
++} from './dto/admin-user.dto';
+ import { JwtAuthGuard } from '../../auth/jwt-auth.guard';
++import { RolesGuard } from '../../auth/roles.guard';
++import { Roles } from '../../auth/roles.decorator';
+ 
+-@UseGuards(JwtAuthGuard)
++@UseGuards(JwtAuthGuard, RolesGuard)
++@Roles('ADMIN')
+ @Controller('admin/users')
+ export class AdminUsersController {
+   constructor(private readonly adminUsersService: AdminUsersService) {}
+@@ -31,4 +48,13 @@ export class AdminUsersController {
+   updateStatus(@Param('id') id: string, @Body() dto: UpdateUserStatusDto) {
+     return this.adminUsersService.updateStatus(id, dto);
+   }
++
++  @Patch(':id/role')
++  updateRole(
++    @Param('id') id: string,
++    @Body() dto: UpdateUserRoleDto,
++    @Request() req: any,
++  ) {
++    return this.adminUsersService.updateRole(id, req.user.userId, dto);
++  }
+ }
+diff --git a/src/admin/users/admin-users.service.spec.ts b/src/admin/users/admin-users.service.spec.ts
+new file mode 100644
+index 0000000..18bb523
+--- /dev/null
++++ b/src/admin/users/admin-users.service.spec.ts
+@@ -0,0 +1,112 @@
++import { Test, TestingModule } from '@nestjs/testing';
++import {
++  NotFoundException,
++  BadRequestException,
++  ForbiddenException,
++} from '@nestjs/common';
++import { AdminUsersService } from './admin-users.service';
++import { PrismaService } from '../../prisma/prisma.service';
++
++describe('AdminUsersService', () => {
++  let service: AdminUsersService;
++  let prisma: {
++    user: {
++      findMany: jest.Mock;
++      findUnique: jest.Mock;
++      update: jest.Mock;
++    };
++  };
++
++  const student = {
++    id: 'user-1',
++    email: 'eleve@nexa.tn',
++    nom: 'Ben Ali',
++    prenom: 'Sami',
++    role: 'STUDENT',
++    status: 'ACTIVE',
++  };
++
++  const admin = { ...student, id: 'admin-1', role: 'ADMIN' };
++
++  beforeEach(async () => {
++    prisma = {
++      user: { findMany: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
++    };
++
++    const module: TestingModule = await Test.createTestingModule({
++      providers: [AdminUsersService, { provide: PrismaService, useValue: prisma }],
++    }).compile();
++
++    service = module.get<AdminUsersService>(AdminUsersService);
++  });
++
++  it('should be defined', () => {
++    expect(service).toBeDefined();
++  });
++
++  describe('updateStatus', () => {
++    it('throws NotFoundException for an unknown user', async () => {
++      prisma.user.findUnique.mockResolvedValue(null);
++      await expect(
++        service.updateStatus('missing', { status: 'SUSPENDED' }),
++      ).rejects.toThrow(NotFoundException);
++    });
++
++    it('suspends a student', async () => {
++      prisma.user.findUnique.mockResolvedValue(student);
++      prisma.user.update.mockResolvedValue({ ...student, status: 'SUSPENDED' });
++
++      const result = await service.updateStatus('user-1', { status: 'SUSPENDED' });
++
++      expect(prisma.user.update).toHaveBeenCalledWith(
++        expect.objectContaining({
++          where: { id: 'user-1' },
++          data: { status: 'SUSPENDED' },
++        }),
++      );
++      expect(result.status).toBe('SUSPENDED');
++    });
++
++    // An admin account reaching this method at all would mean the RolesGuard
++    // was bypassed or a caller passed an admin's id directly — refuse either way.
++    it('refuses to change status of an admin account', async () => {
++      prisma.user.findUnique.mockResolvedValue(admin);
++
++      await expect(
++        service.updateStatus('admin-1', { status: 'BANNED' }),
++      ).rejects.toThrow(BadRequestException);
++      expect(prisma.user.update).not.toHaveBeenCalled();
++    });
++  });
++
++  describe('updateRole', () => {
++    it('refuses to let an admin change their own role', async () => {
++      await expect(
++        service.updateRole('admin-1', 'admin-1', { role: 'STUDENT' }),
++      ).rejects.toThrow(ForbiddenException);
++      expect(prisma.user.findUnique).not.toHaveBeenCalled();
++    });
++
++    it('throws NotFoundException for an unknown user', async () => {
++      prisma.user.findUnique.mockResolvedValue(null);
++      await expect(
++        service.updateRole('missing', 'admin-1', { role: 'ADMIN' }),
++      ).rejects.toThrow(NotFoundException);
++    });
++
++    it('promotes a student to admin', async () => {
++      prisma.user.findUnique.mockResolvedValue(student);
++      prisma.user.update.mockResolvedValue({ ...student, role: 'ADMIN' });
++
++      const result = await service.updateRole('user-1', 'admin-1', { role: 'ADMIN' });
++
++      expect(prisma.user.update).toHaveBeenCalledWith(
++        expect.objectContaining({
++          where: { id: 'user-1' },
++          data: { role: 'ADMIN' },
++        }),
++      );
++      expect(result.role).toBe('ADMIN');
++    });
++  });
++});
+diff --git a/src/admin/users/admin-users.service.ts b/src/admin/users/admin-users.service.ts
+index 946bf52..caee78c 100644
+--- a/src/admin/users/admin-users.service.ts
++++ b/src/admin/users/admin-users.service.ts
+@@ -1,6 +1,15 @@
+-import { Injectable, NotFoundException } from '@nestjs/common';
++import {
++  Injectable,
++  NotFoundException,
++  BadRequestException,
++  ForbiddenException,
++} from '@nestjs/common';
+ import { PrismaService } from '../../prisma/prisma.service';
+-import { UpdateUserDto, UpdateUserStatusDto } from './dto/admin-user.dto';
++import {
++  UpdateUserDto,
++  UpdateUserStatusDto,
++  UpdateUserRoleDto,
++} from './dto/admin-user.dto';
+ 
+ @Injectable()
+ export class AdminUsersService {
+@@ -56,13 +65,42 @@ export class AdminUsersService {
+   }
+ 
+   // 9.3.2 — Suspend or ban
++  // Admin accounts can't be suspended/banned through this route — this
++  // endpoint only ever operates on STUDENT accounts (see findAll above),
++  // but we double-check here too since /admin/users/:id/status accepts any
++  // id in its path.
+   async updateStatus(id: string, dto: UpdateUserStatusDto) {
+     const user = await this.prisma.user.findUnique({ where: { id } });
+     if (!user) throw new NotFoundException('User not found');
++    if (user.role === 'ADMIN') {
++      throw new BadRequestException('Cannot change status of an admin account');
++    }
+     return this.prisma.user.update({
+       where: { id },
+       data: { status: dto.status as any },
+       select: { id: true, nom: true, prenom: true, email: true, status: true },
+     });
+   }
++
++  // 9.3.3 — Promote a student to admin, or demote an admin back to student.
++  async updateRole(
++    id: string,
++    requestingAdminId: string,
++    dto: UpdateUserRoleDto,
++  ) {
++    if (id === requestingAdminId) {
++      throw new ForbiddenException(
++        'Vous ne pouvez pas modifier votre propre rôle.',
++      );
++    }
++    const user = await this.prisma.user.findUnique({ where: { id } });
++    if (!user) {
++      throw new NotFoundException('Utilisateur introuvable');
++    }
++    return this.prisma.user.update({
++      where: { id },
++      data: { role: dto.role as any },
++      select: { id: true, nom: true, prenom: true, email: true, role: true },
++    });
++  }
+ }
+diff --git a/src/admin/users/dto/admin-user.dto.ts b/src/admin/users/dto/admin-user.dto.ts
+index 121362b..3800bb7 100644
+--- a/src/admin/users/dto/admin-user.dto.ts
++++ b/src/admin/users/dto/admin-user.dto.ts
+@@ -1,12 +1,29 @@
+ import { IsIn, IsOptional, IsString } from 'class-validator';
+ 
+ export class UpdateUserDto {
+-  @IsOptional() @IsString() nom?: string;
+-  @IsOptional() @IsString() prenom?: string;
+-  @IsOptional() @IsString() ecole?: string;
+-  @IsOptional() @IsIn(['MP', 'PC', 'TSI', 'BIO', 'TECHNO']) filiere?: string;
++  @IsOptional()
++  @IsString()
++  nom?: string;
++
++  @IsOptional()
++  @IsString()
++  prenom?: string;
++
++  @IsOptional()
++  @IsString()
++  ecole?: string;
++
++  @IsOptional()
++  @IsIn(['MP', 'PC', 'TSI', 'BIO', 'TECHNO'])
++  filiere?: string;
+ }
+ 
+ export class UpdateUserStatusDto {
+-  @IsIn(['ACTIVE', 'INACTIVE', 'SUSPENDED', 'BANNED']) status: string;
++  @IsIn(['ACTIVE', 'INACTIVE', 'SUSPENDED', 'BANNED'])
++  status: string;
++}
++
++export class UpdateUserRoleDto {
++  @IsIn(['STUDENT', 'ADMIN'])
++  role: string;
+ }
+diff --git a/src/auth/auth.service.spec.ts b/src/auth/auth.service.spec.ts
+index e785726..0fb6cb4 100644
+--- a/src/auth/auth.service.spec.ts
++++ b/src/auth/auth.service.spec.ts
+@@ -1,10 +1,16 @@
+ import { Test, TestingModule } from '@nestjs/testing';
+ import { JwtService } from '@nestjs/jwt';
+-import { BadRequestException } from '@nestjs/common';
++import { BadRequestException, UnauthorizedException } from '@nestjs/common';
+ import { AuthService } from './auth.service';
+ import { PrismaService } from '../prisma/prisma.service';
+ import { MailService } from '../mail/mail.service';
+ 
++jest.mock('bcrypt', () => ({
++  compare: jest.fn(),
++  hash: jest.fn(),
++}));
++import * as bcrypt from 'bcrypt';
++
+ describe('AuthService — password reset & email verification', () => {
+   let service: AuthService;
+   let prisma: {
+@@ -73,6 +79,52 @@ describe('AuthService — password reset & email verification', () => {
+     expect(service).toBeDefined();
+   });
+ 
++  describe('login', () => {
++    const activeUser = { ...user, status: 'ACTIVE', passwordHash: 'hashed' };
++
++    beforeEach(() => {
++      (bcrypt.compare as jest.Mock).mockResolvedValue(true);
++    });
++
++    it('throws for an unknown email', async () => {
++      prisma.user.findUnique.mockResolvedValue(null);
++      await expect(
++        service.login({ email: 'nobody@nexa.tn', password: 'x' }),
++      ).rejects.toThrow(UnauthorizedException);
++    });
++
++    it('throws for a wrong password', async () => {
++      prisma.user.findUnique.mockResolvedValue(activeUser);
++      (bcrypt.compare as jest.Mock).mockResolvedValue(false);
++      await expect(
++        service.login({ email: activeUser.email, password: 'wrong' }),
++      ).rejects.toThrow(UnauthorizedException);
++    });
++
++    it('signs in an active user', async () => {
++      prisma.user.findUnique.mockResolvedValue(activeUser);
++      const result = await service.login({ email: activeUser.email, password: 'x' });
++      expect(result).toBeDefined();
++    });
++
++    // Previously nothing checked account status at login (or on any later
++    // request), so a suspend/ban had no real effect on an account that could
++    // still authenticate normally.
++    it('rejects a suspended account even with the correct password', async () => {
++      prisma.user.findUnique.mockResolvedValue({ ...activeUser, status: 'SUSPENDED' });
++      await expect(
++        service.login({ email: activeUser.email, password: 'x' }),
++      ).rejects.toThrow(UnauthorizedException);
++    });
++
++    it('rejects a banned account even with the correct password', async () => {
++      prisma.user.findUnique.mockResolvedValue({ ...activeUser, status: 'BANNED' });
++      await expect(
++        service.login({ email: activeUser.email, password: 'x' }),
++      ).rejects.toThrow(UnauthorizedException);
++    });
++  });
++
+   describe('forgotPassword', () => {
+     it('creates a reset code and emails it when the user exists', async () => {
+       prisma.user.findUnique.mockResolvedValue(user);
+diff --git a/src/auth/auth.service.ts b/src/auth/auth.service.ts
+index 58e87dc..4a0bc60 100644
+--- a/src/auth/auth.service.ts
++++ b/src/auth/auth.service.ts
+@@ -75,6 +75,13 @@ export class AuthService {
+       throw new UnauthorizedException('Invalid credentials');
+     }
+ 
++    if (user.status === 'SUSPENDED') {
++      throw new UnauthorizedException('Ce compte est actuellement suspendu.');
++    }
++    if (user.status === 'BANNED') {
++      throw new UnauthorizedException('Ce compte a été banni.');
++    }
++
+     // Return JWT
+     return this.signToken(user.id, user.email, user.role);
+   }
+diff --git a/src/auth/jwt.strategy.spec.ts b/src/auth/jwt.strategy.spec.ts
+new file mode 100644
+index 0000000..843faaf
+--- /dev/null
++++ b/src/auth/jwt.strategy.spec.ts
+@@ -0,0 +1,56 @@
++import { Test, TestingModule } from '@nestjs/testing';
++import { UnauthorizedException } from '@nestjs/common';
++import { JwtStrategy } from './jwt.strategy';
++import { PrismaService } from '../prisma/prisma.service';
++
++describe('JwtStrategy', () => {
++  let strategy: JwtStrategy;
++  let prisma: { user: { findUnique: jest.Mock } };
++
++  const payload = { sub: 'user-1', email: 'eleve@nexa.tn', role: 'STUDENT' };
++
++  beforeEach(async () => {
++    prisma = { user: { findUnique: jest.fn() } };
++
++    const module: TestingModule = await Test.createTestingModule({
++      providers: [JwtStrategy, { provide: PrismaService, useValue: prisma }],
++    }).compile();
++
++    strategy = module.get<JwtStrategy>(JwtStrategy);
++  });
++
++  it('should be defined', () => {
++    expect(strategy).toBeDefined();
++  });
++
++  it('accepts a token for an active user', async () => {
++    prisma.user.findUnique.mockResolvedValue({ status: 'ACTIVE' });
++
++    const result = await strategy.validate(payload);
++
++    expect(result).toEqual({
++      userId: 'user-1',
++      email: 'eleve@nexa.tn',
++      role: 'STUDENT',
++    });
++  });
++
++  // This is the check that was previously entirely absent — the strategy
++  // used to trust the JWT payload alone and never looked the user up, so a
++  // suspension/ban applied after a token was issued had no effect until
++  // that token expired.
++  it('rejects a token belonging to a suspended user', async () => {
++    prisma.user.findUnique.mockResolvedValue({ status: 'SUSPENDED' });
++    await expect(strategy.validate(payload)).rejects.toThrow(UnauthorizedException);
++  });
++
++  it('rejects a token belonging to a banned user', async () => {
++    prisma.user.findUnique.mockResolvedValue({ status: 'BANNED' });
++    await expect(strategy.validate(payload)).rejects.toThrow(UnauthorizedException);
++  });
++
++  it('rejects a token for a user that no longer exists', async () => {
++    prisma.user.findUnique.mockResolvedValue(null);
++    await expect(strategy.validate(payload)).rejects.toThrow(UnauthorizedException);
++  });
++});
+diff --git a/src/auth/jwt.strategy.ts b/src/auth/jwt.strategy.ts
+index 38bcfd8..8d642ca 100644
+--- a/src/auth/jwt.strategy.ts
++++ b/src/auth/jwt.strategy.ts
+@@ -1,10 +1,11 @@
+-import { Injectable } from '@nestjs/common';
++import { Injectable, UnauthorizedException } from '@nestjs/common';
+ import { PassportStrategy } from '@nestjs/passport';
+ import { ExtractJwt, Strategy } from 'passport-jwt';
++import { PrismaService } from '../prisma/prisma.service';
+ 
+ @Injectable()
+ export class JwtStrategy extends PassportStrategy(Strategy) {
+-  constructor() {
++  constructor(private prisma: PrismaService) {
+     super({
+       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+       secretOrKey: process.env.JWT_SECRET || 'nexa_secret_key',
+@@ -12,6 +13,15 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
+   }
+ 
+   async validate(payload: any) {
++    // Re-check account status on every request so a suspension/ban applied by
++    // an admin takes effect immediately, even for already-issued tokens.
++    const user = await this.prisma.user.findUnique({
++      where: { id: payload.sub },
++      select: { status: true },
++    });
++    if (!user || user.status === 'SUSPENDED' || user.status === 'BANNED') {
++      throw new UnauthorizedException('Compte suspendu, banni ou introuvable.');
++    }
+     return { userId: payload.sub, email: payload.email, role: payload.role };
+   }
+ }
+diff --git a/src/auth/roles.decorator.ts b/src/auth/roles.decorator.ts
+new file mode 100644
+index 0000000..e038e16
+--- /dev/null
++++ b/src/auth/roles.decorator.ts
+@@ -0,0 +1,4 @@
++import { SetMetadata } from '@nestjs/common';
++
++export const ROLES_KEY = 'roles';
++export const Roles = (...roles: string[]) => SetMetadata(ROLES_KEY, roles);
+diff --git a/src/auth/roles.guard.ts b/src/auth/roles.guard.ts
+new file mode 100644
+index 0000000..5ff39da
+--- /dev/null
++++ b/src/auth/roles.guard.ts
+@@ -0,0 +1,32 @@
++import {
++  Injectable,
++  CanActivate,
++  ExecutionContext,
++  ForbiddenException,
++} from '@nestjs/common';
++import { Reflector } from '@nestjs/core';
++import { ROLES_KEY } from './roles.decorator';
++
++// Must run after JwtAuthGuard (needs req.user to already be populated).
++@Injectable()
++export class RolesGuard implements CanActivate {
++  constructor(private reflector: Reflector) {}
++
++  canActivate(context: ExecutionContext): boolean {
++    const requiredRoles = this.reflector.getAllAndOverride<string[]>(
++      ROLES_KEY,
++      [context.getHandler(), context.getClass()],
++    );
++
++    // No @Roles(...) on this route/controller — nothing extra required.
++    if (!requiredRoles || requiredRoles.length === 0) {
++      return true;
++    }
++
++    const { user } = context.switchToHttp().getRequest();
++    if (!user || !requiredRoles.includes(user.role)) {
++      throw new ForbiddenException('Accès réservé aux administrateurs.');
++    }
++    return true;
++  }
++}
+diff --git a/src/contests/contests.controller.spec.ts b/src/contests/contests.controller.spec.ts
+index 645a1cb..3442bc4 100644
+--- a/src/contests/contests.controller.spec.ts
++++ b/src/contests/contests.controller.spec.ts
+@@ -1,12 +1,33 @@
+ import { Test, TestingModule } from '@nestjs/testing';
+ import { ContestsController } from './contests.controller';
++import { ContestsService } from './contests.service';
+ 
+ describe('ContestsController', () => {
+   let controller: ContestsController;
++  let service: {
++    create: jest.Mock;
++    findAll: jest.Mock;
++    findOne: jest.Mock;
++    startSession: jest.Mock;
++    submitAnswer: jest.Mock;
++    getSession: jest.Mock;
++  };
++
++  const req = { user: { userId: 'user-1', role: 'STUDENT' } };
+ 
+   beforeEach(async () => {
++    service = {
++      create: jest.fn(),
++      findAll: jest.fn(),
++      findOne: jest.fn(),
++      startSession: jest.fn(),
++      submitAnswer: jest.fn(),
++      getSession: jest.fn(),
++    };
++
+     const module: TestingModule = await Test.createTestingModule({
+       controllers: [ContestsController],
++      providers: [{ provide: ContestsService, useValue: service }],
+     }).compile();
+ 
+     controller = module.get<ContestsController>(ContestsController);
+@@ -15,4 +36,54 @@ describe('ContestsController', () => {
+   it('should be defined', () => {
+     expect(controller).toBeDefined();
+   });
++
++  it('findAll forwards the filière filter', async () => {
++    service.findAll.mockResolvedValue([]);
++
++    await controller.findAll('MP');
++
++    expect(service.findAll).toHaveBeenCalledWith('MP');
++  });
++
++  it('startSession passes the authenticated user id', async () => {
++    service.startSession.mockResolvedValue({ id: 'session-1' });
++
++    await controller.startSession('contest-1', req);
++
++    expect(service.startSession).toHaveBeenCalledWith('contest-1', 'user-1');
++  });
++
++  it('submitAnswer passes the authenticated user id', async () => {
++    service.submitAnswer.mockResolvedValue({ isCorrect: true });
++
++    await controller.submitAnswer(
++      'session-1',
++      'question-1',
++      { choiceId: 'c-1' } as any,
++      req,
++    );
++
++    expect(service.submitAnswer).toHaveBeenCalledWith(
++      'session-1',
++      'question-1',
++      'user-1',
++      { choiceId: 'c-1' },
++    );
++  });
++
++  it('getSession passes the authenticated user id', async () => {
++    service.getSession.mockResolvedValue({ id: 'session-1' });
++
++    await controller.getSession('session-1', req);
++
++    expect(service.getSession).toHaveBeenCalledWith('session-1', 'user-1');
++  });
++
++  it('create delegates to the service', async () => {
++    service.create.mockResolvedValue({ id: 'contest-1' });
++
++    await controller.create({ titre: 'Concours 2026' } as any);
++
++    expect(service.create).toHaveBeenCalled();
++  });
+ });
+diff --git a/src/contests/contests.controller.ts b/src/contests/contests.controller.ts
+index 38f0984..997f353 100644
+--- a/src/contests/contests.controller.ts
++++ b/src/contests/contests.controller.ts
+@@ -1,16 +1,26 @@
+ import {
+-  Controller, Get, Post, Param, Body, Query, UseGuards, Request,
++  Controller,
++  Get,
++  Post,
++  Param,
++  Body,
++  Query,
++  UseGuards,
++  Request,
+ } from '@nestjs/common';
+ import { ContestsService } from './contests.service';
+ import { CreateContestDto, SubmitContestAnswerDto } from './dto/contest.dto';
+ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
++import { RolesGuard } from '../auth/roles.guard';
++import { Roles } from '../auth/roles.decorator';
+ 
+ @Controller('contests')
+ export class ContestsController {
+   constructor(private readonly contestsService: ContestsService) {}
+ 
+   // Admin: create contest
+-  @UseGuards(JwtAuthGuard)
++  @UseGuards(JwtAuthGuard, RolesGuard)
++  @Roles('ADMIN')
+   @Post()
+   create(@Body() dto: CreateContestDto) {
+     return this.contestsService.create(dto);
+@@ -47,7 +57,12 @@ export class ContestsController {
+     @Body() dto: SubmitContestAnswerDto,
+     @Request() req: any,
+   ) {
+-    return this.contestsService.submitAnswer(sessionId, questionId, req.user.userId, dto);
++    return this.contestsService.submitAnswer(
++      sessionId,
++      questionId,
++      req.user.userId,
++      dto,
++    );
+   }
+ 
+   // Student: get session progress
+@@ -56,4 +71,4 @@ export class ContestsController {
+   getSession(@Param('sessionId') sessionId: string, @Request() req: any) {
+     return this.contestsService.getSession(sessionId, req.user.userId);
+   }
+-}
+\ No newline at end of file
++}
+diff --git a/src/contests/contests.service.spec.ts b/src/contests/contests.service.spec.ts
+index b4dd2f4..52f0d9b 100644
+--- a/src/contests/contests.service.spec.ts
++++ b/src/contests/contests.service.spec.ts
+@@ -1,12 +1,74 @@
+ import { Test, TestingModule } from '@nestjs/testing';
++import { NotFoundException, BadRequestException } from '@nestjs/common';
+ import { ContestsService } from './contests.service';
++import { PrismaService } from '../prisma/prisma.service';
+ 
+ describe('ContestsService', () => {
+   let service: ContestsService;
++  let prisma: {
++    contest: { create: jest.Mock; findMany: jest.Mock; findUnique: jest.Mock };
++    contestSession: {
++      findFirst: jest.Mock;
++      create: jest.Mock;
++      findUnique: jest.Mock;
++      update: jest.Mock;
++    };
++    contestQuestion: { findUnique: jest.Mock };
++    contestSessionAnswer: {
++      findUnique: jest.Mock;
++      create: jest.Mock;
++      count: jest.Mock;
++    };
++    user: { update: jest.Mock };
++    platformSettings: { findUnique: jest.Mock };
++  };
++
++  const question = {
++    id: 'q-1',
++    xpBase: 100,
++    solutionDetaillee: 'La solution...',
++    choix: [
++      { id: 'choice-correct', label: 'A', isCorrect: true },
++      { id: 'choice-wrong', label: 'B', isCorrect: false },
++    ],
++  };
++
++  const session = {
++    id: 'session-1',
++    userId: 'user-1',
++    contestId: 'contest-1',
++    isCompleted: false,
++    contest: { questions: [question] },
++  };
+ 
+   beforeEach(async () => {
++    prisma = {
++      contest: {
++        create: jest.fn(),
++        findMany: jest.fn(),
++        findUnique: jest.fn(),
++      },
++      contestSession: {
++        findFirst: jest.fn(),
++        create: jest.fn(),
++        findUnique: jest.fn(),
++        update: jest.fn(),
++      },
++      contestQuestion: { findUnique: jest.fn() },
++      contestSessionAnswer: {
++        findUnique: jest.fn(),
++        create: jest.fn(),
++        count: jest.fn(),
++      },
++      user: { update: jest.fn() },
++      platformSettings: { findUnique: jest.fn().mockResolvedValue(null) },
++    };
++
+     const module: TestingModule = await Test.createTestingModule({
+-      providers: [ContestsService],
++      providers: [
++        ContestsService,
++        { provide: PrismaService, useValue: prisma },
++      ],
+     }).compile();
+ 
+     service = module.get<ContestsService>(ContestsService);
+@@ -15,4 +77,216 @@ describe('ContestsService', () => {
+   it('should be defined', () => {
+     expect(service).toBeDefined();
+   });
++
++  describe('create', () => {
++    it('creates a contest with its nested questions and choices', async () => {
++      prisma.contest.create.mockResolvedValue({ id: 'contest-1' });
++
++      await service.create({
++        titre: 'Concours 2026',
++        annee: 2026,
++        filiere: 'MP',
++        questions: [
++          {
++            ordre: 1,
++            enonce: '...',
++            solutionDetaillee: '...',
++            xpBase: 100,
++            choix: [{ label: 'A', isCorrect: true }],
++          },
++        ],
++      });
++
++      expect(prisma.contest.create).toHaveBeenCalledWith(
++        expect.objectContaining({
++          data: expect.objectContaining({
++            titre: 'Concours 2026',
++            filiere: 'MP',
++            questions: {
++              create: [
++                expect.objectContaining({
++                  ordre: 1,
++                  choix: { create: [{ label: 'A', isCorrect: true }] },
++                }),
++              ],
++            },
++          }),
++        }),
++      );
++    });
++  });
++
++  describe('startSession', () => {
++    it('throws NotFoundException for an unknown contest', async () => {
++      prisma.contest.findUnique.mockResolvedValue(null);
++
++      await expect(service.startSession('missing', 'user-1')).rejects.toThrow(
++        NotFoundException,
++      );
++    });
++
++    it('resumes an existing incomplete session instead of creating a new one', async () => {
++      prisma.contest.findUnique.mockResolvedValue({ id: 'contest-1' });
++      prisma.contestSession.findFirst.mockResolvedValue(session);
++
++      const result = await service.startSession('contest-1', 'user-1');
++
++      expect(prisma.contestSession.create).not.toHaveBeenCalled();
++      expect(result).toBe(session);
++    });
++
++    it('creates a new session when there is no incomplete one', async () => {
++      prisma.contest.findUnique.mockResolvedValue({ id: 'contest-1' });
++      prisma.contestSession.findFirst.mockResolvedValue(null);
++      prisma.contestSession.create.mockResolvedValue(session);
++
++      await service.startSession('contest-1', 'user-1');
++
++      expect(prisma.contestSession.create).toHaveBeenCalledWith({
++        data: { userId: 'user-1', contestId: 'contest-1' },
++        include: { answers: true },
++      });
++    });
++  });
++
++  describe('submitAnswer', () => {
++    it('throws NotFoundException for an unknown session', async () => {
++      prisma.contestSession.findUnique.mockResolvedValue(null);
++
++      await expect(
++        service.submitAnswer('missing', 'q-1', 'user-1', {
++          choiceId: 'x',
++          hintsUsed: 0,
++        }),
++      ).rejects.toThrow(NotFoundException);
++    });
++
++    it('throws BadRequestException if the session belongs to another user', async () => {
++      prisma.contestSession.findUnique.mockResolvedValue(session);
++
++      await expect(
++        service.submitAnswer('session-1', 'q-1', 'someone-else', {
++          choiceId: 'choice-correct',
++          hintsUsed: 0,
++        }),
++      ).rejects.toThrow(BadRequestException);
++    });
++
++    it('throws BadRequestException if the session is already completed', async () => {
++      prisma.contestSession.findUnique.mockResolvedValue({
++        ...session,
++        isCompleted: true,
++      });
++
++      await expect(
++        service.submitAnswer('session-1', 'q-1', 'user-1', {
++          choiceId: 'choice-correct',
++          hintsUsed: 0,
++        }),
++      ).rejects.toThrow(BadRequestException);
++    });
++
++    it('throws BadRequestException if the question was already answered', async () => {
++      prisma.contestSession.findUnique.mockResolvedValue(session);
++      prisma.contestQuestion.findUnique.mockResolvedValue(question);
++      prisma.contestSessionAnswer.findUnique.mockResolvedValue({
++        id: 'existing-answer',
++      });
++
++      await expect(
++        service.submitAnswer('session-1', 'q-1', 'user-1', {
++          choiceId: 'choice-correct',
++          hintsUsed: 0,
++        }),
++      ).rejects.toThrow(BadRequestException);
++    });
++
++    it('awards XP for a correct answer and marks the session completed when it was the last question', async () => {
++      prisma.contestSession.findUnique.mockResolvedValue(session);
++      prisma.contestQuestion.findUnique.mockResolvedValue(question);
++      prisma.contestSessionAnswer.findUnique.mockResolvedValue(null);
++      prisma.contestSessionAnswer.count.mockResolvedValue(1); // 1 of 1 questions
++
++      const result = await service.submitAnswer('session-1', 'q-1', 'user-1', {
++        choiceId: 'choice-correct',
++        hintsUsed: 0,
++      });
++
++      expect(result.isCorrect).toBe(true);
++      expect(result.xpEarned).toBe(100);
++      expect(result.isCompleted).toBe(true);
++      expect(prisma.contestSession.update).toHaveBeenCalledWith(
++        expect.objectContaining({
++          where: { id: 'session-1' },
++          data: expect.objectContaining({ isCompleted: true }),
++        }),
++      );
++      expect(prisma.user.update).toHaveBeenCalledWith({
++        where: { id: 'user-1' },
++        data: { xpTotal: { increment: 100 } },
++      });
++    });
++
++    it('does not award XP for an incorrect answer', async () => {
++      prisma.contestSession.findUnique.mockResolvedValue(session);
++      prisma.contestQuestion.findUnique.mockResolvedValue(question);
++      prisma.contestSessionAnswer.findUnique.mockResolvedValue(null);
++      prisma.contestSessionAnswer.count.mockResolvedValue(1);
++
++      const result = await service.submitAnswer('session-1', 'q-1', 'user-1', {
++        choiceId: 'choice-wrong',
++        hintsUsed: 0,
++      });
++
++      expect(result.xpEarned).toBe(0);
++      expect(prisma.user.update).not.toHaveBeenCalled();
++    });
++
++    // 12.2.3 — la pénalité d'indice configurée en admin s'applique aussi aux concours
++    it('applies the admin-configured hint penalties', async () => {
++      prisma.contestSession.findUnique.mockResolvedValue(session);
++      prisma.contestQuestion.findUnique.mockResolvedValue(question);
++      prisma.contestSessionAnswer.findUnique.mockResolvedValue(null);
++      prisma.contestSessionAnswer.count.mockResolvedValue(1);
++      prisma.platformSettings.findUnique.mockResolvedValue({
++        hintPenaltyPercent1: 5,
++        hintPenaltyPercent2: 15,
++        hintPenaltyPercent3: 25,
++        hintPenaltyPercent4: 50,
++      });
++
++      const result = await service.submitAnswer('session-1', 'q-1', 'user-1', {
++        choiceId: 'choice-correct',
++        hintsUsed: 3,
++      });
++
++      expect(result.xpEarned).toBe(75); // 100 * (1 - 25/100)
++    });
++  });
++
++  describe('getSession', () => {
++    it('throws NotFoundException for an unknown session', async () => {
++      prisma.contestSession.findUnique.mockResolvedValue(null);
++
++      await expect(service.getSession('missing', 'user-1')).rejects.toThrow(
++        NotFoundException,
++      );
++    });
++
++    it("throws BadRequestException for another user's session", async () => {
++      prisma.contestSession.findUnique.mockResolvedValue(session);
++
++      await expect(
++        service.getSession('session-1', 'someone-else'),
++      ).rejects.toThrow(BadRequestException);
++    });
++
++    it('returns the session for its owner', async () => {
++      prisma.contestSession.findUnique.mockResolvedValue(session);
++
++      const result = await service.getSession('session-1', 'user-1');
++
++      expect(result).toBe(session);
++    });
++  });
+ });
+diff --git a/src/contests/contests.service.ts b/src/contests/contests.service.ts
+index f28700a..44ac930 100644
+--- a/src/contests/contests.service.ts
++++ b/src/contests/contests.service.ts
+@@ -1,4 +1,8 @@
+-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
++import {
++  Injectable,
++  NotFoundException,
++  BadRequestException,
++} from '@nestjs/common';
+ import { PrismaService } from '../prisma/prisma.service';
+ import { CreateContestDto, SubmitContestAnswerDto } from './dto/contest.dto';
+ 
+@@ -30,7 +34,11 @@ export class ContestsService {
+     return this.prisma.contest.findMany({
+       where: { ...(filiere && { filiere: filiere as any }) },
+       select: {
+-        id: true, titre: true, annee: true, filiere: true, matiere: true,
++        id: true,
++        titre: true,
++        annee: true,
++        filiere: true,
++        matiere: true,
+         _count: { select: { questions: true } },
+       },
+       orderBy: { annee: 'desc' },
+@@ -56,7 +64,9 @@ export class ContestsService {
+ 
+   // ─── Student: Start or resume session ────────────────────────────────────
+   async startSession(contestId: string, userId: string) {
+-    const contest = await this.prisma.contest.findUnique({ where: { id: contestId } });
++    const contest = await this.prisma.contest.findUnique({
++      where: { id: contestId },
++    });
+     if (!contest) throw new NotFoundException('Contest not found');
+ 
+     // Check existing incomplete session
+@@ -84,8 +94,10 @@ export class ContestsService {
+       include: { contest: { include: { questions: true } } },
+     });
+     if (!session) throw new NotFoundException('Session not found');
+-    if (session.userId !== userId) throw new BadRequestException('Unauthorized');
+-    if (session.isCompleted) throw new BadRequestException('Session already completed');
++    if (session.userId !== userId)
++      throw new BadRequestException('Unauthorized');
++    if (session.isCompleted)
++      throw new BadRequestException('Session already completed');
+ 
+     const question = await this.prisma.contestQuestion.findUnique({
+       where: { id: questionId },
+@@ -93,7 +105,7 @@ export class ContestsService {
+     });
+     if (!question) throw new NotFoundException('Question not found');
+ 
+-    const selectedChoice = question.choix.find(c => c.id === dto.choiceId);
++    const selectedChoice = question.choix.find((c) => c.id === dto.choiceId);
+     if (!selectedChoice) throw new BadRequestException('Invalid choice');
+ 
+     // Check not already answered
+@@ -102,24 +114,31 @@ export class ContestsService {
+     });
+     if (alreadyAnswered) throw new BadRequestException('Already answered');
+ 
+-    // Calculate XP
+-    const penalties = [0, 10, 20, 30, 40];
+-    const penalty = penalties[dto.hintsUsed] ?? 40;
++    // Calculate XP with hint penalty (configurable via /admin/settings — feature 12.2)
++    const penalties = await this.getHintPenalties();
++    const penalty = penalties[dto.hintsUsed] ?? penalties[penalties.length - 1];
+     const isCorrect = selectedChoice.isCorrect;
+-    const xpEarned = isCorrect ? Math.floor(question.xpBase * (1 - penalty / 100)) : 0;
++    const xpEarned = isCorrect
++      ? Math.floor(question.xpBase * (1 - penalty / 100))
++      : 0;
+ 
+     // Save answer
+     await this.prisma.contestSessionAnswer.create({
+       data: {
+-        sessionId, questionId,
++        sessionId,
++        questionId,
+         selectedChoiceId: dto.choiceId,
+-        isCorrect, hintsUsed: dto.hintsUsed, xpEarned,
++        isCorrect,
++        hintsUsed: dto.hintsUsed,
++        xpEarned,
+       },
+     });
+ 
+     // Update session progress
+     const totalQuestions = session.contest.questions.length;
+-    const answeredCount = await this.prisma.contestSessionAnswer.count({ where: { sessionId } });
++    const answeredCount = await this.prisma.contestSessionAnswer.count({
++      where: { sessionId },
++    });
+     const isCompleted = answeredCount >= totalQuestions;
+ 
+     await this.prisma.contestSession.update({
+@@ -144,7 +163,7 @@ export class ContestsService {
+       isCorrect,
+       xpEarned,
+       solution: question.solutionDetaillee,
+-      correctChoiceId: question.choix.find(c => c.isCorrect)?.id,
++      correctChoiceId: question.choix.find((c) => c.isCorrect)?.id,
+       questionsCompleted: answeredCount,
+       totalQuestions,
+       isCompleted,
+@@ -158,7 +177,31 @@ export class ContestsService {
+       include: { answers: true },
+     });
+     if (!session) throw new NotFoundException('Session not found');
+-    if (session.userId !== userId) throw new BadRequestException('Unauthorized');
++    if (session.userId !== userId)
++      throw new BadRequestException('Unauthorized');
+     return session;
+   }
+-}
+\ No newline at end of file
++
++  // Reads the admin-configured hint penalties (feature 12.2). Falls back to
++  // the previous hardcoded defaults if settings haven't been configured yet,
++  // or if the settings row can't be reached.
++  private async getHintPenalties(): Promise<number[]> {
++    try {
++      const settings = await this.prisma.platformSettings.findUnique({
++        where: { id: 1 },
++      });
++      if (!settings) {
++        return [0, 10, 20, 30, 40];
++      }
++      return [
++        0,
++        settings.hintPenaltyPercent1,
++        settings.hintPenaltyPercent2,
++        settings.hintPenaltyPercent3,
++        settings.hintPenaltyPercent4,
++      ];
++    } catch {
++      return [0, 10, 20, 30, 40];
++    }
++  }
++}
+diff --git a/src/exercises/exercises.controller.spec.ts b/src/exercises/exercises.controller.spec.ts
+index 1170fb3..1e45e2a 100644
+--- a/src/exercises/exercises.controller.spec.ts
++++ b/src/exercises/exercises.controller.spec.ts
+@@ -1,12 +1,31 @@
+ import { Test, TestingModule } from '@nestjs/testing';
+ import { ExercisesController } from './exercises.controller';
++import { ExercisesService } from './exercises.service';
+ 
+ describe('ExercisesController', () => {
+   let controller: ExercisesController;
++  let service: {
++    create: jest.Mock;
++    findAll: jest.Mock;
++    findOne: jest.Mock;
++    submitAnswer: jest.Mock;
++    remove: jest.Mock;
++  };
++
++  const req = { user: { userId: 'user-1', role: 'STUDENT' } };
+ 
+   beforeEach(async () => {
++    service = {
++      create: jest.fn(),
++      findAll: jest.fn(),
++      findOne: jest.fn(),
++      submitAnswer: jest.fn(),
++      remove: jest.fn(),
++    };
++
+     const module: TestingModule = await Test.createTestingModule({
+       controllers: [ExercisesController],
++      providers: [{ provide: ExercisesService, useValue: service }],
+     }).compile();
+ 
+     controller = module.get<ExercisesController>(ExercisesController);
+@@ -15,4 +34,51 @@ describe('ExercisesController', () => {
+   it('should be defined', () => {
+     expect(controller).toBeDefined();
+   });
++
++  it('findAll forwards matiere/difficulte filters', async () => {
++    service.findAll.mockResolvedValue([]);
++
++    await controller.findAll('MATHEMATIQUES', 'UN_ETOILE');
++
++    expect(service.findAll).toHaveBeenCalledWith('MATHEMATIQUES', 'UN_ETOILE');
++  });
++
++  it('submitAnswer passes the authenticated user id', async () => {
++    service.submitAnswer.mockResolvedValue({ isCorrect: true, xpEarned: 100 });
++
++    await controller.submitAnswer(
++      'ex-1',
++      { choiceId: 'c-1', hintsUsed: 0 },
++      req,
++    );
++
++    expect(service.submitAnswer).toHaveBeenCalledWith('ex-1', 'user-1', {
++      choiceId: 'c-1',
++      hintsUsed: 0,
++    });
++  });
++
++  it('create delegates to the service', async () => {
++    service.create.mockResolvedValue({ id: 'ex-1' });
++
++    await controller.create({
++      titre: 'Limites',
++      matiere: 'MATHEMATIQUES',
++      difficulte: 'UN_ETOILE',
++      enonce: '...',
++      solutionDetaillee: '...',
++      xpBase: 100,
++      choix: [],
++    });
++
++    expect(service.create).toHaveBeenCalled();
++  });
++
++  it('remove delegates to the service', async () => {
++    service.remove.mockResolvedValue({ message: 'Exercise deleted' });
++
++    await controller.remove('ex-1');
++
++    expect(service.remove).toHaveBeenCalledWith('ex-1');
++  });
+ });
+diff --git a/src/exercises/exercises.controller.ts b/src/exercises/exercises.controller.ts
+index 8c5273a..328d255 100644
+--- a/src/exercises/exercises.controller.ts
++++ b/src/exercises/exercises.controller.ts
+@@ -13,13 +13,16 @@ import { ExercisesService } from './exercises.service';
+ import { CreateExerciseDto } from './dto/create-exercise.dto';
+ import { SubmitAnswerDto } from './dto/submit-answer.dto';
+ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
++import { RolesGuard } from '../auth/roles.guard';
++import { Roles } from '../auth/roles.decorator';
+ 
+ @Controller('exercises')
+ export class ExercisesController {
+   constructor(private readonly exercisesService: ExercisesService) {}
+ 
+-  // Admin: create exercise (protected)
+-  @UseGuards(JwtAuthGuard)
++  // Admin: create exercise
++  @UseGuards(JwtAuthGuard, RolesGuard)
++  @Roles('ADMIN')
+   @Post()
+   create(@Body() dto: CreateExerciseDto) {
+     return this.exercisesService.create(dto);
+@@ -54,8 +57,9 @@ export class ExercisesController {
+     return this.exercisesService.submitAnswer(id, req.user.userId, dto);
+   }
+ 
+-  // Admin: delete exercise (protected)
+-  @UseGuards(JwtAuthGuard)
++  // Admin: delete exercise
++  @UseGuards(JwtAuthGuard, RolesGuard)
++  @Roles('ADMIN')
+   @Delete(':id')
+   remove(@Param('id') id: string) {
+     return this.exercisesService.remove(id);
+diff --git a/src/exercises/exercises.service.spec.ts b/src/exercises/exercises.service.spec.ts
+index 262a8e5..a74c243 100644
+--- a/src/exercises/exercises.service.spec.ts
++++ b/src/exercises/exercises.service.spec.ts
+@@ -1,12 +1,51 @@
+ import { Test, TestingModule } from '@nestjs/testing';
++import { NotFoundException, BadRequestException } from '@nestjs/common';
+ import { ExercisesService } from './exercises.service';
++import { PrismaService } from '../prisma/prisma.service';
+ 
+ describe('ExercisesService', () => {
+   let service: ExercisesService;
++  let prisma: {
++    exercise: {
++      create: jest.Mock;
++      findMany: jest.Mock;
++      findUnique: jest.Mock;
++      delete: jest.Mock;
++    };
++    exerciseAttempt: { create: jest.Mock };
++    user: { update: jest.Mock };
++    platformSettings: { findUnique: jest.Mock };
++  };
++
++  const exercise = {
++    id: 'ex-1',
++    titre: 'Limites',
++    xpBase: 100,
++    solutionDetaillee: 'La solution...',
++    choix: [
++      { id: 'choice-correct', label: 'A', isCorrect: true },
++      { id: 'choice-wrong', label: 'B', isCorrect: false },
++    ],
++  };
+ 
+   beforeEach(async () => {
++    prisma = {
++      exercise: {
++        create: jest.fn(),
++        findMany: jest.fn(),
++        findUnique: jest.fn(),
++        delete: jest.fn(),
++      },
++      exerciseAttempt: { create: jest.fn() },
++      user: { update: jest.fn() },
++      platformSettings: { findUnique: jest.fn().mockResolvedValue(null) },
++    };
++
+     const module: TestingModule = await Test.createTestingModule({
+-      providers: [ExercisesService],
++      providers: [
++        ExercisesService,
++        { provide: PrismaService, useValue: prisma },
++      ],
+     }).compile();
+ 
+     service = module.get<ExercisesService>(ExercisesService);
+@@ -15,4 +54,176 @@ describe('ExercisesService', () => {
+   it('should be defined', () => {
+     expect(service).toBeDefined();
+   });
++
++  // 10.1.3 — Tests de la création d'exercice
++  describe('create', () => {
++    it('creates an exercise with its choices in one call', async () => {
++      prisma.exercise.create.mockResolvedValue(exercise);
++
++      await service.create({
++        titre: 'Limites',
++        matiere: 'MATHEMATIQUES',
++        difficulte: 'DEUX_ETOILES',
++        enonce: 'Calculez la limite...',
++        solutionDetaillee: 'La solution...',
++        xpBase: 100,
++        choix: [
++          { label: 'A', isCorrect: true },
++          { label: 'B', isCorrect: false },
++        ],
++      });
++
++      expect(prisma.exercise.create).toHaveBeenCalledWith(
++        expect.objectContaining({
++          data: expect.objectContaining({
++            titre: 'Limites',
++            matiere: 'MATHEMATIQUES',
++            difficulte: 'DEUX_ETOILES',
++            choix: {
++              create: [
++                { label: 'A', isCorrect: true },
++                { label: 'B', isCorrect: false },
++              ],
++            },
++          }),
++        }),
++      );
++    });
++  });
++
++  describe('submitAnswer', () => {
++    it('throws NotFoundException for an unknown exercise', async () => {
++      prisma.exercise.findUnique.mockResolvedValue(null);
++
++      await expect(
++        service.submitAnswer('missing', 'user-1', {
++          choiceId: 'x',
++          hintsUsed: 0,
++        }),
++      ).rejects.toThrow(NotFoundException);
++    });
++
++    it('throws BadRequestException when the choice does not belong to the exercise', async () => {
++      prisma.exercise.findUnique.mockResolvedValue(exercise);
++
++      await expect(
++        service.submitAnswer('ex-1', 'user-1', {
++          choiceId: 'not-a-real-choice',
++          hintsUsed: 0,
++        }),
++      ).rejects.toThrow(BadRequestException);
++    });
++
++    it('awards full XP for a correct answer with no hints used', async () => {
++      prisma.exercise.findUnique.mockResolvedValue(exercise);
++      prisma.exerciseAttempt.create.mockResolvedValue({});
++
++      const result = await service.submitAnswer('ex-1', 'user-1', {
++        choiceId: 'choice-correct',
++        hintsUsed: 0,
++      });
++
++      expect(result.isCorrect).toBe(true);
++      expect(result.xpEarned).toBe(100);
++      expect(prisma.user.update).toHaveBeenCalledWith({
++        where: { id: 'user-1' },
++        data: { xpTotal: { increment: 100 } },
++      });
++    });
++
++    it('awards 0 XP for an incorrect answer and does not touch user XP', async () => {
++      prisma.exercise.findUnique.mockResolvedValue(exercise);
++      prisma.exerciseAttempt.create.mockResolvedValue({});
++
++      const result = await service.submitAnswer('ex-1', 'user-1', {
++        choiceId: 'choice-wrong',
++        hintsUsed: 0,
++      });
++
++      expect(result.isCorrect).toBe(false);
++      expect(result.xpEarned).toBe(0);
++      expect(prisma.user.update).not.toHaveBeenCalled();
++    });
++
++    // 12.2.3 — la pénalité d'indice configurée en admin est bien appliquée
++    it('applies the default hint penalties when no settings are configured', async () => {
++      prisma.exercise.findUnique.mockResolvedValue(exercise);
++      prisma.exerciseAttempt.create.mockResolvedValue({});
++      prisma.platformSettings.findUnique.mockResolvedValue(null);
++
++      const result = await service.submitAnswer('ex-1', 'user-1', {
++        choiceId: 'choice-correct',
++        hintsUsed: 2, // default penalty for hint 2 = 20%
++      });
++
++      expect(result.xpEarned).toBe(80); // 100 * (1 - 20/100)
++    });
++
++    it('applies the admin-configured hint penalties instead of the defaults', async () => {
++      prisma.exercise.findUnique.mockResolvedValue(exercise);
++      prisma.exerciseAttempt.create.mockResolvedValue({});
++      prisma.platformSettings.findUnique.mockResolvedValue({
++        hintPenaltyPercent1: 5,
++        hintPenaltyPercent2: 15,
++        hintPenaltyPercent3: 25,
++        hintPenaltyPercent4: 50,
++      });
++
++      const result = await service.submitAnswer('ex-1', 'user-1', {
++        choiceId: 'choice-correct',
++        hintsUsed: 4,
++      });
++
++      expect(result.xpEarned).toBe(50); // 100 * (1 - 50/100)
++    });
++
++    it('falls back to the default penalties if the settings lookup fails', async () => {
++      prisma.exercise.findUnique.mockResolvedValue(exercise);
++      prisma.exerciseAttempt.create.mockResolvedValue({});
++      prisma.platformSettings.findUnique.mockRejectedValue(
++        new Error('DB unreachable'),
++      );
++
++      const result = await service.submitAnswer('ex-1', 'user-1', {
++        choiceId: 'choice-correct',
++        hintsUsed: 1, // default penalty for hint 1 = 10%
++      });
++
++      expect(result.xpEarned).toBe(90);
++    });
++
++    it('reveals the solution and the correct choice id in the response', async () => {
++      prisma.exercise.findUnique.mockResolvedValue(exercise);
++      prisma.exerciseAttempt.create.mockResolvedValue({});
++
++      const result = await service.submitAnswer('ex-1', 'user-1', {
++        choiceId: 'choice-wrong',
++        hintsUsed: 0,
++      });
++
++      expect(result.solution).toBe('La solution...');
++      expect(result.correctChoiceId).toBe('choice-correct');
++    });
++  });
++
++  describe('remove', () => {
++    it('throws NotFoundException for an unknown exercise', async () => {
++      prisma.exercise.findUnique.mockResolvedValue(null);
++
++      await expect(service.remove('missing')).rejects.toThrow(
++        NotFoundException,
++      );
++    });
++
++    it('deletes an existing exercise', async () => {
++      prisma.exercise.findUnique.mockResolvedValue(exercise);
++
++      const result = await service.remove('ex-1');
++
++      expect(prisma.exercise.delete).toHaveBeenCalledWith({
++        where: { id: 'ex-1' },
++      });
++      expect(result.message).toMatch(/deleted/i);
++    });
++  });
+ });
+diff --git a/src/exercises/exercises.service.ts b/src/exercises/exercises.service.ts
+index 88d90fc..a51dc07 100644
+--- a/src/exercises/exercises.service.ts
++++ b/src/exercises/exercises.service.ts
+@@ -1,4 +1,8 @@
+-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
++import {
++  Injectable,
++  NotFoundException,
++  BadRequestException,
++} from '@nestjs/common';
+ import { PrismaService } from '../prisma/prisma.service';
+ import { CreateExerciseDto } from './dto/create-exercise.dto';
+ import { SubmitAnswerDto } from './dto/submit-answer.dto';
+@@ -70,20 +74,20 @@ export class ExercisesService {
+     if (!exercise) throw new NotFoundException('Exercise not found');
+ 
+     // Validate the submitted choice belongs to this exercise
+-    const selectedChoice = exercise.choix.find(c => c.id === dto.choiceId);
++    const selectedChoice = exercise.choix.find((c) => c.id === dto.choiceId);
+     if (!selectedChoice) throw new BadRequestException('Invalid choice');
+ 
+-    // Calculate XP with hint penalty
+-    // Get penalty percentages from a simple config (can be made dynamic later)
+-    const penalties = [0, 10, 20, 30, 40];
+-    const penaltyPercent = penalties[dto.hintsUsed] ?? 40;
++    // Calculate XP with hint penalty (configurable via /admin/settings — feature 12.2)
++    const penalties = await this.getHintPenalties();
++    const penaltyPercent =
++      penalties[dto.hintsUsed] ?? penalties[penalties.length - 1];
+     const isCorrect = selectedChoice.isCorrect;
+     const xpEarned = isCorrect
+       ? Math.floor(exercise.xpBase * (1 - penaltyPercent / 100))
+       : 0;
+ 
+     // Save attempt
+-    const attempt = await this.prisma.exerciseAttempt.create({
++    await this.prisma.exerciseAttempt.create({
+       data: {
+         userId,
+         exerciseId,
+@@ -107,7 +111,7 @@ export class ExercisesService {
+       isCorrect,
+       xpEarned,
+       solution: exercise.solutionDetaillee,
+-      correctChoiceId: exercise.choix.find(c => c.isCorrect)?.id,
++      correctChoiceId: exercise.choix.find((c) => c.isCorrect)?.id,
+     };
+   }
+ 
+@@ -118,4 +122,28 @@ export class ExercisesService {
+     await this.prisma.exercise.delete({ where: { id } });
+     return { message: 'Exercise deleted' };
+   }
++
++  // Reads the admin-configured hint penalties (feature 12.2). Falls back to
++  // the previous hardcoded defaults if settings haven't been configured yet,
++  // or if the settings row can't be reached — grading an answer should never
++  // fail because of the config lookup.
++  private async getHintPenalties(): Promise<number[]> {
++    try {
++      const settings = await this.prisma.platformSettings.findUnique({
++        where: { id: 1 },
++      });
++      if (!settings) {
++        return [0, 10, 20, 30, 40];
++      }
++      return [
++        0,
++        settings.hintPenaltyPercent1,
++        settings.hintPenaltyPercent2,
++        settings.hintPenaltyPercent3,
++        settings.hintPenaltyPercent4,
++      ];
++    } catch {
++      return [0, 10, 20, 30, 40];
++    }
++  }
+ }
+diff --git a/src/forum/forum.service.ts b/src/forum/forum.service.ts
+index d895599..b773cb5 100644
+--- a/src/forum/forum.service.ts
++++ b/src/forum/forum.service.ts
+@@ -41,9 +41,26 @@ export class ForumService {
+     return post;
+   }
+ 
++  // Reads the admin-configured forum XP rewards (feature 12.2). Falls back to
++  // the previous implicit default (0 — no reward) if settings can't be
++  // reached — creating a post or reply should never fail because of the
++  // config lookup.
++  private async getForumXpRewards(): Promise<{ post: number; reply: number }> {
++    try {
++      const settings = await this.prisma.platformSettings.findUnique({ where: { id: 1 } });
++      if (!settings) return { post: 0, reply: 0 };
++      return {
++        post: settings.xpPerForumPost ?? 0,
++        reply: settings.xpPerForumReply ?? 0,
++      };
++    } catch {
++      return { post: 0, reply: 0 };
++    }
++  }
++
+   // 7.2 — Create post
+   async createPost(dto: CreatePostDto, userId: string) {
+-    return this.prisma.forumPost.create({
++    const post = await this.prisma.forumPost.create({
+       data: {
+         titre: dto.titre,
+         contenu: dto.contenu,
+@@ -54,16 +71,37 @@ export class ForumService {
+         author: { select: { id: true, nom: true, prenom: true } },
+       },
+     });
++
++    const { post: xpEarned } = await this.getForumXpRewards();
++    if (xpEarned > 0) {
++      await this.prisma.user.update({
++        where: { id: userId },
++        data: { xpTotal: { increment: xpEarned } },
++      });
++    }
++
++    return { ...post, xpEarned };
+   }
+ 
+   // 7.3 — Add reply
+   async createReply(postId: string, dto: CreateReplyDto, userId: string) {
+     const post = await this.prisma.forumPost.findUnique({ where: { id: postId } });
+     if (!post) throw new NotFoundException('Post not found');
+-    return this.prisma.forumReply.create({
++
++    const reply = await this.prisma.forumReply.create({
+       data: { contenu: dto.contenu, postId, authorId: userId },
+       include: { author: { select: { id: true, nom: true, prenom: true } } },
+     });
++
++    const { reply: xpEarned } = await this.getForumXpRewards();
++    if (xpEarned > 0) {
++      await this.prisma.user.update({
++        where: { id: userId },
++        data: { xpTotal: { increment: xpEarned } },
++      });
++    }
++
++    return { ...reply, xpEarned };
+   }
+ 
+   // 7.3 — Toggle like on post
+diff --git a/src/middleware/maintenance.middleware.spec.ts b/src/middleware/maintenance.middleware.spec.ts
+new file mode 100644
+index 0000000..1a36035
+--- /dev/null
++++ b/src/middleware/maintenance.middleware.spec.ts
+@@ -0,0 +1,65 @@
++import { Test, TestingModule } from '@nestjs/testing';
++import { ServiceUnavailableException } from '@nestjs/common';
++import { MaintenanceMiddleware } from './maintenance.middleware';
++import { AdminSettingsService } from '../admin/settings/admin-settings.service';
++
++describe('MaintenanceMiddleware', () => {
++  let middleware: MaintenanceMiddleware;
++  let settingsService: { isMaintenanceMode: jest.Mock };
++  let next: jest.Mock;
++
++  beforeEach(async () => {
++    settingsService = { isMaintenanceMode: jest.fn() };
++    next = jest.fn();
++
++    const module: TestingModule = await Test.createTestingModule({
++      providers: [
++        MaintenanceMiddleware,
++        { provide: AdminSettingsService, useValue: settingsService },
++      ],
++    }).compile();
++
++    middleware = module.get<MaintenanceMiddleware>(MaintenanceMiddleware);
++  });
++
++  it('should be defined', () => {
++    expect(middleware).toBeDefined();
++  });
++
++  it('always lets /admin routes through, even during maintenance', async () => {
++    const req: any = { path: '/admin/settings' };
++
++    await middleware.use(req, {} as any, next);
++
++    expect(settingsService.isMaintenanceMode).not.toHaveBeenCalled();
++    expect(next).toHaveBeenCalled();
++  });
++
++  it('always lets /auth routes through, even during maintenance', async () => {
++    const req: any = { path: '/auth/login' };
++
++    await middleware.use(req, {} as any, next);
++
++    expect(settingsService.isMaintenanceMode).not.toHaveBeenCalled();
++    expect(next).toHaveBeenCalled();
++  });
++
++  it('lets other routes through when maintenance mode is off', async () => {
++    settingsService.isMaintenanceMode.mockResolvedValue(false);
++    const req: any = { path: '/exercises' };
++
++    await middleware.use(req, {} as any, next);
++
++    expect(next).toHaveBeenCalled();
++  });
++
++  it('blocks other routes with 503 when maintenance mode is on', async () => {
++    settingsService.isMaintenanceMode.mockResolvedValue(true);
++    const req: any = { path: '/exercises' };
++
++    await expect(middleware.use(req, {} as any, next)).rejects.toThrow(
++      ServiceUnavailableException,
++    );
++    expect(next).not.toHaveBeenCalled();
++  });
++});
+-- 
+2.43.0
+

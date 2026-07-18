@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { UpdateExerciseDto, UpdateContestDto } from './dto/update-content.dto';
 
 @Injectable()
 export class AdminContentService {
@@ -14,27 +15,27 @@ export class AdminContentService {
     });
   }
 
-  async updateExercise(id: string, data: any) {
-    const { choix, ...exerciseData } = data;
+  async updateExercise(id: string, dto: UpdateExerciseDto) {
+    const { choix, ...exerciseData } = dto;
     const existing = await this.prisma.exercise.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException('Exercise not found');
 
-    if (choix) {
-      // Delete existing choices and recreate
-      await this.prisma.exerciseChoice.deleteMany({ where: { exerciseId: id } });
-      await this.prisma.exerciseChoice.createMany({
-        data: choix.map((c: any) => ({ ...c, exerciseId: id })),
+    return this.prisma.$transaction(async (tx) => {
+      if (choix) {
+        // Replace choices atomically with the exercise update so a failed
+        // write can't leave the exercise with no choices attached.
+        await tx.exerciseChoice.deleteMany({ where: { exerciseId: id } });
+      }
+      return tx.exercise.update({
+        where: { id },
+        data: {
+          ...exerciseData,
+          ...(exerciseData.matiere && { matiere: exerciseData.matiere as any }),
+          ...(exerciseData.difficulte && { difficulte: exerciseData.difficulte as any }),
+          ...(choix && { choix: { create: choix } }),
+        },
+        include: { choix: true },
       });
-    }
-
-    return this.prisma.exercise.update({
-      where: { id },
-      data: {
-        ...exerciseData,
-        ...(exerciseData.matiere && { matiere: exerciseData.matiere as any }),
-        ...(exerciseData.difficulte && { difficulte: exerciseData.difficulte as any }),
-      },
-      include: { choix: true },
     });
   }
 
@@ -54,17 +55,33 @@ export class AdminContentService {
     });
   }
 
-  async updateContest(id: string, data: any) {
+  async updateContest(id: string, dto: UpdateContestDto) {
     const existing = await this.prisma.contest.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException('Contest not found');
-    const { questions, ...contestData } = data;
-    return this.prisma.contest.update({
-      where: { id },
-      data: {
-        ...contestData,
-        ...(contestData.filiere && { filiere: contestData.filiere as any }),
-        ...(contestData.matiere && { matiere: contestData.matiere as any }),
-      },
+    const { questions, ...contestData } = dto;
+
+    return this.prisma.$transaction(async (tx) => {
+      if (questions) {
+        // Replace the question set atomically with the rest of the update.
+        await tx.contestQuestion.deleteMany({ where: { contestId: id } });
+      }
+      return tx.contest.update({
+        where: { id },
+        data: {
+          ...contestData,
+          ...(contestData.filiere && { filiere: contestData.filiere as any }),
+          ...(contestData.matiere && { matiere: contestData.matiere as any }),
+          ...(questions && {
+            questions: {
+              create: questions.map(({ choix, ...q }) => ({
+                ...q,
+                choix: { create: choix },
+              })),
+            },
+          }),
+        },
+        include: { questions: { include: { choix: true } } },
+      });
     });
   }
 

@@ -1,4 +1,8 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateExerciseDto } from './dto/create-exercise.dto';
 import { SubmitAnswerDto } from './dto/submit-answer.dto';
@@ -70,20 +74,20 @@ export class ExercisesService {
     if (!exercise) throw new NotFoundException('Exercise not found');
 
     // Validate the submitted choice belongs to this exercise
-    const selectedChoice = exercise.choix.find(c => c.id === dto.choiceId);
+    const selectedChoice = exercise.choix.find((c) => c.id === dto.choiceId);
     if (!selectedChoice) throw new BadRequestException('Invalid choice');
 
-    // Calculate XP with hint penalty
-    // Get penalty percentages from a simple config (can be made dynamic later)
-    const penalties = [0, 10, 20, 30, 40];
-    const penaltyPercent = penalties[dto.hintsUsed] ?? 40;
+    // Calculate XP with hint penalty (configurable via /admin/settings — feature 12.2)
+    const penalties = await this.getHintPenalties();
+    const penaltyPercent =
+      penalties[dto.hintsUsed] ?? penalties[penalties.length - 1];
     const isCorrect = selectedChoice.isCorrect;
     const xpEarned = isCorrect
       ? Math.floor(exercise.xpBase * (1 - penaltyPercent / 100))
       : 0;
 
     // Save attempt
-    const attempt = await this.prisma.exerciseAttempt.create({
+    await this.prisma.exerciseAttempt.create({
       data: {
         userId,
         exerciseId,
@@ -107,7 +111,7 @@ export class ExercisesService {
       isCorrect,
       xpEarned,
       solution: exercise.solutionDetaillee,
-      correctChoiceId: exercise.choix.find(c => c.isCorrect)?.id,
+      correctChoiceId: exercise.choix.find((c) => c.isCorrect)?.id,
     };
   }
 
@@ -117,5 +121,29 @@ export class ExercisesService {
     if (!exercise) throw new NotFoundException('Exercise not found');
     await this.prisma.exercise.delete({ where: { id } });
     return { message: 'Exercise deleted' };
+  }
+
+  // Reads the admin-configured hint penalties (feature 12.2). Falls back to
+  // the previous hardcoded defaults if settings haven't been configured yet,
+  // or if the settings row can't be reached — grading an answer should never
+  // fail because of the config lookup.
+  private async getHintPenalties(): Promise<number[]> {
+    try {
+      const settings = await this.prisma.platformSettings.findUnique({
+        where: { id: 1 },
+      });
+      if (!settings) {
+        return [0, 10, 20, 30, 40];
+      }
+      return [
+        0,
+        settings.hintPenaltyPercent1,
+        settings.hintPenaltyPercent2,
+        settings.hintPenaltyPercent3,
+        settings.hintPenaltyPercent4,
+      ];
+    } catch {
+      return [0, 10, 20, 30, 40];
+    }
   }
 }

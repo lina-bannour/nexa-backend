@@ -1,9 +1,26 @@
-import { Controller, Get, Put, Patch, Param, Body, Query, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Put,
+  Patch,
+  Param,
+  Body,
+  Query,
+  UseGuards,
+  Request,
+} from '@nestjs/common';
 import { AdminUsersService } from './admin-users.service';
-import { UpdateUserDto, UpdateUserStatusDto } from './dto/admin-user.dto';
+import {
+  UpdateUserDto,
+  UpdateUserStatusDto,
+  UpdateUserRoleDto,
+} from './dto/admin-user.dto';
 import { JwtAuthGuard } from '../../auth/jwt-auth.guard';
+import { RolesGuard } from '../../auth/roles.guard';
+import { Roles } from '../../auth/roles.decorator';
 
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles('ADMIN')
 @Controller('admin/users')
 export class AdminUsersController {
   constructor(private readonly adminUsersService: AdminUsersService) {}
@@ -30,5 +47,14 @@ export class AdminUsersController {
   @Patch(':id/status')
   updateStatus(@Param('id') id: string, @Body() dto: UpdateUserStatusDto) {
     return this.adminUsersService.updateStatus(id, dto);
+  }
+
+  @Patch(':id/role')
+  updateRole(
+    @Param('id') id: string,
+    @Body() dto: UpdateUserRoleDto,
+    @Request() req: any,
+  ) {
+    return this.adminUsersService.updateRole(id, req.user.userId, dto);
   }
 }

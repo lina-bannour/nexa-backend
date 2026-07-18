@@ -1,9 +1,15 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { JwtService } from '@nestjs/jwt';
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, UnauthorizedException } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { MailService } from '../mail/mail.service';
+
+jest.mock('bcrypt', () => ({
+  compare: jest.fn(),
+  hash: jest.fn(),
+}));
+import * as bcrypt from 'bcrypt';
 
 describe('AuthService — password reset & email verification', () => {
   let service: AuthService;
@@ -71,6 +77,52 @@ describe('AuthService — password reset & email verification', () => {
 
   it('should be defined', () => {
     expect(service).toBeDefined();
+  });
+
+  describe('login', () => {
+    const activeUser = { ...user, status: 'ACTIVE', passwordHash: 'hashed' };
+
+    beforeEach(() => {
+      (bcrypt.compare as jest.Mock).mockResolvedValue(true);
+    });
+
+    it('throws for an unknown email', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+      await expect(
+        service.login({ email: 'nobody@nexa.tn', password: 'x' }),
+      ).rejects.toThrow(UnauthorizedException);
+    });
+
+    it('throws for a wrong password', async () => {
+      prisma.user.findUnique.mockResolvedValue(activeUser);
+      (bcrypt.compare as jest.Mock).mockResolvedValue(false);
+      await expect(
+        service.login({ email: activeUser.email, password: 'wrong' }),
+      ).rejects.toThrow(UnauthorizedException);
+    });
+
+    it('signs in an active user', async () => {
+      prisma.user.findUnique.mockResolvedValue(activeUser);
+      const result = await service.login({ email: activeUser.email, password: 'x' });
+      expect(result).toBeDefined();
+    });
+
+    // Previously nothing checked account status at login (or on any later
+    // request), so a suspend/ban had no real effect on an account that could
+    // still authenticate normally.
+    it('rejects a suspended account even with the correct password', async () => {
+      prisma.user.findUnique.mockResolvedValue({ ...activeUser, status: 'SUSPENDED' });
+      await expect(
+        service.login({ email: activeUser.email, password: 'x' }),
+      ).rejects.toThrow(UnauthorizedException);
+    });
+
+    it('rejects a banned account even with the correct password', async () => {
+      prisma.user.findUnique.mockResolvedValue({ ...activeUser, status: 'BANNED' });
+      await expect(
+        service.login({ email: activeUser.email, password: 'x' }),
+      ).rejects.toThrow(UnauthorizedException);
+    });
   });
 
   describe('forgotPassword', () => {

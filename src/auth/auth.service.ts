@@ -75,6 +75,13 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
+    if (user.status === 'SUSPENDED') {
+      throw new UnauthorizedException('Ce compte est actuellement suspendu.');
+    }
+    if (user.status === 'BANNED') {
+      throw new UnauthorizedException('Ce compte a été banni.');
+    }
+
     // Return JWT
     return this.signToken(user.id, user.email, user.role);
   }

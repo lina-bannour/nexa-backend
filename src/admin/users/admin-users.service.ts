@@ -1,6 +1,15 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  ForbiddenException,
+} from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import { UpdateUserDto, UpdateUserStatusDto } from './dto/admin-user.dto';
+import {
+  UpdateUserDto,
+  UpdateUserStatusDto,
+  UpdateUserRoleDto,
+} from './dto/admin-user.dto';
 
 @Injectable()
 export class AdminUsersService {
@@ -56,13 +65,42 @@ export class AdminUsersService {
   }
 
   // 9.3.2 — Suspend or ban
+  // Admin accounts can't be suspended/banned through this route — this
+  // endpoint only ever operates on STUDENT accounts (see findAll above),
+  // but we double-check here too since /admin/users/:id/status accepts any
+  // id in its path.
   async updateStatus(id: string, dto: UpdateUserStatusDto) {
     const user = await this.prisma.user.findUnique({ where: { id } });
     if (!user) throw new NotFoundException('User not found');
+    if (user.role === 'ADMIN') {
+      throw new BadRequestException('Cannot change status of an admin account');
+    }
     return this.prisma.user.update({
       where: { id },
       data: { status: dto.status as any },
       select: { id: true, nom: true, prenom: true, email: true, status: true },
+    });
+  }
+
+  // 9.3.3 — Promote a student to admin, or demote an admin back to student.
+  async updateRole(
+    id: string,
+    requestingAdminId: string,
+    dto: UpdateUserRoleDto,
+  ) {
+    if (id === requestingAdminId) {
+      throw new ForbiddenException(
+        'Vous ne pouvez pas modifier votre propre rôle.',
+      );
+    }
+    const user = await this.prisma.user.findUnique({ where: { id } });
+    if (!user) {
+      throw new NotFoundException('Utilisateur introuvable');
+    }
+    return this.prisma.user.update({
+      where: { id },
+      data: { role: dto.role as any },
+      select: { id: true, nom: true, prenom: true, email: true, role: true },
     });
   }
 }

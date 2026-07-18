@@ -53,6 +53,7 @@ model User {
   prenom       String
   role         Role       @default(STUDENT)
   status       UserStatus @default(ACTIVE)
+  emailVerified Boolean   @default(false)
   ecole        String?
   filiere      Filiere?
   xpTotal      Int        @default(0)
@@ -63,6 +64,8 @@ model User {
   posts           ForumPost[]
   replies         ForumReply[]
   likes           ForumLike[]
+  resetTokens        PasswordResetToken[]
+  verificationTokens EmailVerificationToken[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -269,4 +272,28 @@ model PlatformSettings {
   updatedAt DateTime @updatedAt
 
   @@map("platform_settings")
+}
+
+model PasswordResetToken {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  used      Boolean  @default(false)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@map("password_reset_tokens")
+}
+
+model EmailVerificationToken {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  used      Boolean  @default(false)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@map("email_verification_tokens")
 }

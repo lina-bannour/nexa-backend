@@ -7,13 +7,12 @@ export class AdminSettingsService {
   constructor(private prisma: PrismaService) {}
 
   async getSettings() {
-    // Get or create single-row settings
-    const settings = await this.prisma.platformSettings.upsert({
+    // Get or create the single settings row.
+    return this.prisma.platformSettings.upsert({
       where: { id: 1 },
       update: {},
       create: { id: 1 },
     });
-    return settings;
   }
 
   async updateSettings(dto: UpdateSettingsDto) {
@@ -32,10 +31,13 @@ export class AdminSettingsService {
     });
   }
 
-  // Used by maintenance middleware
+  // Used by MaintenanceMiddleware — must never throw (fails open if the
+  // settings row/table isn't reachable yet, e.g. right after a fresh migration).
   async isMaintenanceMode(): Promise<boolean> {
     try {
-      const settings = await this.prisma.platformSettings.findUnique({ where: { id: 1 } });
+      const settings = await this.prisma.platformSettings.findUnique({
+        where: { id: 1 },
+      });
       return settings?.maintenanceMode ?? false;
     } catch {
       return false;

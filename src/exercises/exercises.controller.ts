@@ -13,13 +13,16 @@ import { ExercisesService } from './exercises.service';
 import { CreateExerciseDto } from './dto/create-exercise.dto';
 import { SubmitAnswerDto } from './dto/submit-answer.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { RolesGuard } from '../auth/roles.guard';
+import { Roles } from '../auth/roles.decorator';
 
 @Controller('exercises')
 export class ExercisesController {
   constructor(private readonly exercisesService: ExercisesService) {}
 
-  // Admin: create exercise (protected)
-  @UseGuards(JwtAuthGuard)
+  // Admin: create exercise
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('ADMIN')
   @Post()
   create(@Body() dto: CreateExerciseDto) {
     return this.exercisesService.create(dto);
@@ -54,8 +57,9 @@ export class ExercisesController {
     return this.exercisesService.submitAnswer(id, req.user.userId, dto);
   }
 
-  // Admin: delete exercise (protected)
-  @UseGuards(JwtAuthGuard)
+  // Admin: delete exercise
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('ADMIN')
   @Delete(':id')
   remove(@Param('id') id: string) {
     return this.exercisesService.remove(id);

@@ -1,16 +1,26 @@
 import {
-  Controller, Get, Post, Param, Body, Query, UseGuards, Request,
+  Controller,
+  Get,
+  Post,
+  Param,
+  Body,
+  Query,
+  UseGuards,
+  Request,
 } from '@nestjs/common';
 import { ContestsService } from './contests.service';
 import { CreateContestDto, SubmitContestAnswerDto } from './dto/contest.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { RolesGuard } from '../auth/roles.guard';
+import { Roles } from '../auth/roles.decorator';
 
 @Controller('contests')
 export class ContestsController {
   constructor(private readonly contestsService: ContestsService) {}
 
   // Admin: create contest
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('ADMIN')
   @Post()
   create(@Body() dto: CreateContestDto) {
     return this.contestsService.create(dto);
@@ -47,7 +57,12 @@ export class ContestsController {
     @Body() dto: SubmitContestAnswerDto,
     @Request() req: any,
   ) {
-    return this.contestsService.submitAnswer(sessionId, questionId, req.user.userId, dto);
+    return this.contestsService.submitAnswer(
+      sessionId,
+      questionId,
+      req.user.userId,
+      dto,
+    );
   }
 
   // Student: get session progress

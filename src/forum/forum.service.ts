@@ -41,9 +41,26 @@ export class ForumService {
     return post;
   }
 
+  // Reads the admin-configured forum XP rewards (feature 12.2). Falls back to
+  // the previous implicit default (0 — no reward) if settings can't be
+  // reached — creating a post or reply should never fail because of the
+  // config lookup.
+  private async getForumXpRewards(): Promise<{ post: number; reply: number }> {
+    try {
+      const settings = await this.prisma.platformSettings.findUnique({ where: { id: 1 } });
+      if (!settings) return { post: 0, reply: 0 };
+      return {
+        post: settings.xpPerForumPost ?? 0,
+        reply: settings.xpPerForumReply ?? 0,
+      };
+    } catch {
+      return { post: 0, reply: 0 };
+    }
+  }
+
   // 7.2 — Create post
   async createPost(dto: CreatePostDto, userId: string) {
-    return this.prisma.forumPost.create({
+    const post = await this.prisma.forumPost.create({
       data: {
         titre: dto.titre,
         contenu: dto.contenu,
@@ -54,16 +71,37 @@ export class ForumService {
         author: { select: { id: true, nom: true, prenom: true } },
       },
     });
+
+    const { post: xpEarned } = await this.getForumXpRewards();
+    if (xpEarned > 0) {
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: { xpTotal: { increment: xpEarned } },
+      });
+    }
+
+    return { ...post, xpEarned };
   }
 
   // 7.3 — Add reply
   async createReply(postId: string, dto: CreateReplyDto, userId: string) {
     const post = await this.prisma.forumPost.findUnique({ where: { id: postId } });
     if (!post) throw new NotFoundException('Post not found');
-    return this.prisma.forumReply.create({
+
+    const reply = await this.prisma.forumReply.create({
       data: { contenu: dto.contenu, postId, authorId: userId },
       include: { author: { select: { id: true, nom: true, prenom: true } } },
     });
+
+    const { reply: xpEarned } = await this.getForumXpRewards();
+    if (xpEarned > 0) {
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: { xpTotal: { increment: xpEarned } },
+      });
+    }
+
+    return { ...reply, xpEarned };
   }
 
   // 7.3 — Toggle like on post
