@@ -8,6 +8,7 @@ describe('UsersController', () => {
     getProfile: jest.Mock;
     updateProfile: jest.Mock;
     getLeaderboard: jest.Mock;
+    getMyRank: jest.Mock;
   };
 
   const req = { user: { userId: 'user-1' } };
@@ -17,6 +18,7 @@ describe('UsersController', () => {
       getProfile: jest.fn(),
       updateProfile: jest.fn(),
       getLeaderboard: jest.fn(),
+      getMyRank: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -54,11 +56,37 @@ describe('UsersController', () => {
     expect(result).toEqual({ id: 'user-1', ecole: 'IPEIT' });
   });
 
-  it('getLeaderboard forwards the optional filiere query param', async () => {
+  it('getLeaderboard forwards the optional filiere query param with the default global period', async () => {
     usersService.getLeaderboard.mockResolvedValue([]);
 
     await controller.getLeaderboard('MP');
 
-    expect(usersService.getLeaderboard).toHaveBeenCalledWith('MP');
+    expect(usersService.getLeaderboard).toHaveBeenCalledWith('MP', 'global');
+  });
+
+  it('getLeaderboard forwards an explicit period', async () => {
+    usersService.getLeaderboard.mockResolvedValue([]);
+
+    await controller.getLeaderboard(undefined, 'semaine');
+
+    expect(usersService.getLeaderboard).toHaveBeenCalledWith(undefined, 'semaine');
+  });
+
+  // 6.2.3 — Tests de l'affichage du rang personnel
+  it('getMyRank delegates to the service with the authenticated user id, filiere, and period', async () => {
+    usersService.getMyRank.mockResolvedValue({ rank: 3, xpTotal: 90, total: 20, period: 'mois', filiere: 'MP' });
+
+    const result = await controller.getMyRank(req, 'MP', 'mois');
+
+    expect(usersService.getMyRank).toHaveBeenCalledWith('user-1', 'MP', 'mois');
+    expect(result.rank).toBe(3);
+  });
+
+  it('getMyRank defaults period to global when not provided', async () => {
+    usersService.getMyRank.mockResolvedValue({ rank: 1, xpTotal: 100, total: 5, period: 'global', filiere: null });
+
+    await controller.getMyRank(req);
+
+    expect(usersService.getMyRank).toHaveBeenCalledWith('user-1', undefined, 'global');
   });
 });

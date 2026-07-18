@@ -1,0 +1,819 @@
+From 6466e30f568342a8d25eadd638b5b052d04916d2 Mon Sep 17 00:00:00 2001
+From: Claude <claude@anthropic.com>
+Date: Sat, 18 Jul 2026 18:53:13 +0000
+Subject: [PATCH] feat: leaderboard period filter + personal rank endpoint,
+ plus test coverage
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Backend gaps closed (backlog #6):
+- GET /users/leaderboard now supports period=semaine|mois|global in addition
+  to filiere. Previously only filiere filtering existed; week/month didn't
+  exist at all despite being in the backlog. Period ranking sums XP from
+  exercise attempts and contest answers by timestamp; global ranking uses
+  xpTotal directly (and so is the only view that includes forum XP, which
+  has no dated ledger to filter by — noted in the code).
+- New GET /users/me/rank endpoint (also period/filiere aware) — backlog #6.2
+  called for a personal-rank display but no backend support existed for it
+  at all, despite the tracking sheet marking it done.
+- getLeaderboard now excludes ADMIN accounts from the ranking (previously
+  admins would show up on the student leaderboard).
+
+Test coverage added (previously zero for these):
+- forum.service.ts / forum.controller.ts — full coverage (listing, filtering,
+  post/reply creation with XP awarding incl. the settings-lookup-failure
+  fallback, like/unlike toggle, reporting).
+- auth.controller.ts — routing/delegation coverage for all six endpoints.
+- users.service.ts / users.controller.ts — rewritten to cover the new period
+  and personal-rank behavior alongside the existing profile tests.
+
+Full suite: 20/20 test suites, 156/156 tests passing (verified against a
+local Prisma client stub, as usual in this sandbox — run against your real
+migrated database to be sure, same as the last patch).
+---
+ src/auth/auth.controller.spec.ts   |  93 +++++++++++++
+ src/forum/forum.controller.spec.ts |  89 +++++++++++++
+ src/forum/forum.service.spec.ts    | 206 +++++++++++++++++++++++++++++
+ src/users/users.controller.spec.ts |  32 ++++-
+ src/users/users.controller.ts      |  19 ++-
+ src/users/users.service.spec.ts    |  96 +++++++++++++-
+ src/users/users.service.ts         | 117 +++++++++++++---
+ 7 files changed, 628 insertions(+), 24 deletions(-)
+ create mode 100644 src/auth/auth.controller.spec.ts
+ create mode 100644 src/forum/forum.controller.spec.ts
+ create mode 100644 src/forum/forum.service.spec.ts
+
+diff --git a/src/auth/auth.controller.spec.ts b/src/auth/auth.controller.spec.ts
+new file mode 100644
+index 0000000..6251360
+--- /dev/null
++++ b/src/auth/auth.controller.spec.ts
+@@ -0,0 +1,93 @@
++import { Test, TestingModule } from '@nestjs/testing';
++import { AuthController } from './auth.controller';
++import { AuthService } from './auth.service';
++
++describe('AuthController', () => {
++  let controller: AuthController;
++  let authService: {
++    register: jest.Mock;
++    login: jest.Mock;
++    forgotPassword: jest.Mock;
++    resetPassword: jest.Mock;
++    verifyEmail: jest.Mock;
++    resendVerification: jest.Mock;
++  };
++
++  beforeEach(async () => {
++    authService = {
++      register: jest.fn(),
++      login: jest.fn(),
++      forgotPassword: jest.fn(),
++      resetPassword: jest.fn(),
++      verifyEmail: jest.fn(),
++      resendVerification: jest.fn(),
++    };
++
++    const module: TestingModule = await Test.createTestingModule({
++      controllers: [AuthController],
++      providers: [{ provide: AuthService, useValue: authService }],
++    }).compile();
++
++    controller = module.get<AuthController>(AuthController);
++  });
++
++  it('should be defined', () => {
++    expect(controller).toBeDefined();
++  });
++
++  it('register delegates to the service with the dto', async () => {
++    const dto = { email: 'e@nexa.tn', password: 'x', nom: 'A', prenom: 'B' };
++    authService.register.mockResolvedValue({ id: 'user-1' });
++
++    const result = await controller.register(dto as any);
++
++    expect(authService.register).toHaveBeenCalledWith(dto);
++    expect(result).toEqual({ id: 'user-1' });
++  });
++
++  it('login delegates to the service with the dto', async () => {
++    const dto = { email: 'e@nexa.tn', password: 'x' };
++    authService.login.mockResolvedValue({ access_token: 'signed' });
++
++    const result = await controller.login(dto as any);
++
++    expect(authService.login).toHaveBeenCalledWith(dto);
++    expect(result).toEqual({ access_token: 'signed' });
++  });
++
++  it('forgotPassword delegates to the service with the dto', async () => {
++    const dto = { email: 'e@nexa.tn' };
++    authService.forgotPassword.mockResolvedValue({ message: 'ok' });
++
++    await controller.forgotPassword(dto as any);
++
++    expect(authService.forgotPassword).toHaveBeenCalledWith(dto);
++  });
++
++  it('resetPassword delegates to the service with the dto', async () => {
++    const dto = { token: 'abc', newPassword: 'newpass123' };
++    authService.resetPassword.mockResolvedValue({ message: 'ok' });
++
++    await controller.resetPassword(dto as any);
++
++    expect(authService.resetPassword).toHaveBeenCalledWith(dto);
++  });
++
++  it('verifyEmail delegates to the service with the dto', async () => {
++    const dto = { token: 'abc' };
++    authService.verifyEmail.mockResolvedValue({ message: 'ok' });
++
++    await controller.verifyEmail(dto as any);
++
++    expect(authService.verifyEmail).toHaveBeenCalledWith(dto);
++  });
++
++  it('resendVerification delegates to the service with the dto', async () => {
++    const dto = { email: 'e@nexa.tn' };
++    authService.resendVerification.mockResolvedValue({ message: 'ok' });
++
++    await controller.resendVerification(dto as any);
++
++    expect(authService.resendVerification).toHaveBeenCalledWith(dto);
++  });
++});
+diff --git a/src/forum/forum.controller.spec.ts b/src/forum/forum.controller.spec.ts
+new file mode 100644
+index 0000000..e617e42
+--- /dev/null
++++ b/src/forum/forum.controller.spec.ts
+@@ -0,0 +1,89 @@
++import { Test, TestingModule } from '@nestjs/testing';
++import { ForumController } from './forum.controller';
++import { ForumService } from './forum.service';
++
++describe('ForumController', () => {
++  let controller: ForumController;
++  let forumService: {
++    listPosts: jest.Mock;
++    getPost: jest.Mock;
++    createPost: jest.Mock;
++    createReply: jest.Mock;
++    togglePostLike: jest.Mock;
++    reportPost: jest.Mock;
++  };
++
++  const req = { user: { userId: 'user-1' } };
++
++  beforeEach(async () => {
++    forumService = {
++      listPosts: jest.fn(),
++      getPost: jest.fn(),
++      createPost: jest.fn(),
++      createReply: jest.fn(),
++      togglePostLike: jest.fn(),
++      reportPost: jest.fn(),
++    };
++
++    const module: TestingModule = await Test.createTestingModule({
++      controllers: [ForumController],
++      providers: [{ provide: ForumService, useValue: forumService }],
++    }).compile();
++
++    controller = module.get<ForumController>(ForumController);
++  });
++
++  it('should be defined', () => {
++    expect(controller).toBeDefined();
++  });
++
++  it('listPosts forwards the optional matiere filter', async () => {
++    forumService.listPosts.mockResolvedValue([]);
++    await controller.listPosts('MATHEMATIQUES');
++    expect(forumService.listPosts).toHaveBeenCalledWith('MATHEMATIQUES');
++  });
++
++  it('getPost delegates to the service with the post id', async () => {
++    forumService.getPost.mockResolvedValue({ id: 'post-1' });
++    const result = await controller.getPost('post-1');
++    expect(forumService.getPost).toHaveBeenCalledWith('post-1');
++    expect(result).toEqual({ id: 'post-1' });
++  });
++
++  it('createPost delegates to the service with the dto and authenticated user id', async () => {
++    const dto = { titre: 'Aide', contenu: '...', matiere: 'MATHEMATIQUES' };
++    forumService.createPost.mockResolvedValue({ id: 'post-1', xpEarned: 3 });
++
++    const result = await controller.createPost(dto as any, req);
++
++    expect(forumService.createPost).toHaveBeenCalledWith(dto, 'user-1');
++    expect(result.xpEarned).toBe(3);
++  });
++
++  it('createReply delegates to the service with the post id, dto, and authenticated user id', async () => {
++    const dto = { contenu: 'Merci' };
++    forumService.createReply.mockResolvedValue({ id: 'reply-1', xpEarned: 1 });
++
++    await controller.createReply('post-1', dto as any, req);
++
++    expect(forumService.createReply).toHaveBeenCalledWith('post-1', dto, 'user-1');
++  });
++
++  it('toggleLike delegates to the service with the post id and authenticated user id', async () => {
++    forumService.togglePostLike.mockResolvedValue({ liked: true });
++
++    const result = await controller.toggleLike('post-1', req);
++
++    expect(forumService.togglePostLike).toHaveBeenCalledWith('post-1', 'user-1');
++    expect(result).toEqual({ liked: true });
++  });
++
++  it('reportPost delegates to the service with the post id', async () => {
++    forumService.reportPost.mockResolvedValue({ id: 'post-1', status: 'REPORTED' });
++
++    const result = await controller.reportPost('post-1');
++
++    expect(forumService.reportPost).toHaveBeenCalledWith('post-1');
++    expect(result.status).toBe('REPORTED');
++  });
++});
+diff --git a/src/forum/forum.service.spec.ts b/src/forum/forum.service.spec.ts
+new file mode 100644
+index 0000000..607c4b7
+--- /dev/null
++++ b/src/forum/forum.service.spec.ts
+@@ -0,0 +1,206 @@
++import { Test, TestingModule } from '@nestjs/testing';
++import { NotFoundException } from '@nestjs/common';
++import { ForumService } from './forum.service';
++import { PrismaService } from '../prisma/prisma.service';
++
++describe('ForumService', () => {
++  let service: ForumService;
++  let prisma: {
++    forumPost: {
++      findMany: jest.Mock;
++      findUnique: jest.Mock;
++      create: jest.Mock;
++      update: jest.Mock;
++    };
++    forumReply: { create: jest.Mock };
++    forumLike: { findUnique: jest.Mock; create: jest.Mock; delete: jest.Mock };
++    platformSettings: { findUnique: jest.Mock };
++    user: { update: jest.Mock };
++  };
++
++  const post = { id: 'post-1', titre: 'Aide', contenu: '...', matiere: 'MATHEMATIQUES', status: 'PUBLISHED' };
++
++  beforeEach(async () => {
++    prisma = {
++      forumPost: {
++        findMany: jest.fn(),
++        findUnique: jest.fn(),
++        create: jest.fn(),
++        update: jest.fn(),
++      },
++      forumReply: { create: jest.fn() },
++      forumLike: { findUnique: jest.fn(), create: jest.fn(), delete: jest.fn() },
++      platformSettings: { findUnique: jest.fn() },
++      user: { update: jest.fn() },
++    };
++
++    const module: TestingModule = await Test.createTestingModule({
++      providers: [ForumService, { provide: PrismaService, useValue: prisma }],
++    }).compile();
++
++    service = module.get<ForumService>(ForumService);
++  });
++
++  it('should be defined', () => {
++    expect(service).toBeDefined();
++  });
++
++  // 7.1.3 — Tests d'affichage et de filtrage des posts
++  describe('listPosts', () => {
++    it('only returns published posts when no matiere filter is given', async () => {
++      prisma.forumPost.findMany.mockResolvedValue([post]);
++
++      const result = await service.listPosts();
++
++      expect(prisma.forumPost.findMany).toHaveBeenCalledWith(
++        expect.objectContaining({ where: { status: 'PUBLISHED' } }),
++      );
++      expect(result).toEqual([post]);
++    });
++
++    it('filters by matiere when provided', async () => {
++      prisma.forumPost.findMany.mockResolvedValue([post]);
++
++      await service.listPosts('MATHEMATIQUES');
++
++      expect(prisma.forumPost.findMany).toHaveBeenCalledWith(
++        expect.objectContaining({
++          where: { status: 'PUBLISHED', matiere: 'MATHEMATIQUES' },
++        }),
++      );
++    });
++  });
++
++  describe('getPost', () => {
++    it('throws NotFoundException for an unknown post', async () => {
++      prisma.forumPost.findUnique.mockResolvedValue(null);
++      await expect(service.getPost('missing')).rejects.toThrow(NotFoundException);
++    });
++
++    it('returns the post with its replies', async () => {
++      prisma.forumPost.findUnique.mockResolvedValue({ ...post, replies: [] });
++      const result = await service.getPost('post-1');
++      expect(result).toEqual(expect.objectContaining({ id: 'post-1' }));
++    });
++  });
++
++  // 7.2.3 — Tests de la création de post
++  describe('createPost', () => {
++    it('creates the post and awards no XP when settings are absent', async () => {
++      prisma.forumPost.create.mockResolvedValue(post);
++      prisma.platformSettings.findUnique.mockResolvedValue(null);
++
++      const result = await service.createPost(
++        { titre: 'Aide', contenu: '...', matiere: 'MATHEMATIQUES' },
++        'user-1',
++      );
++
++      expect(prisma.user.update).not.toHaveBeenCalled();
++      expect(result.xpEarned).toBe(0);
++    });
++
++    it('awards the configured XP for a new post', async () => {
++      prisma.forumPost.create.mockResolvedValue(post);
++      prisma.platformSettings.findUnique.mockResolvedValue({
++        xpPerForumPost: 3,
++        xpPerForumReply: 1,
++      });
++
++      const result = await service.createPost(
++        { titre: 'Aide', contenu: '...', matiere: 'MATHEMATIQUES' },
++        'user-1',
++      );
++
++      expect(prisma.user.update).toHaveBeenCalledWith({
++        where: { id: 'user-1' },
++        data: { xpTotal: { increment: 3 } },
++      });
++      expect(result.xpEarned).toBe(3);
++    });
++
++    // Settings lookup failing should never block the post itself.
++    it('still creates the post if the settings lookup throws', async () => {
++      prisma.forumPost.create.mockResolvedValue(post);
++      prisma.platformSettings.findUnique.mockRejectedValue(new Error('db down'));
++
++      const result = await service.createPost(
++        { titre: 'Aide', contenu: '...', matiere: 'MATHEMATIQUES' },
++        'user-1',
++      );
++
++      expect(result.xpEarned).toBe(0);
++      expect(prisma.user.update).not.toHaveBeenCalled();
++    });
++  });
++
++  // 7.3.4 — Tests des interactions (réponses, likes)
++  describe('createReply', () => {
++    it('throws NotFoundException for an unknown post', async () => {
++      prisma.forumPost.findUnique.mockResolvedValue(null);
++      await expect(
++        service.createReply('missing', { contenu: 'Merci' }, 'user-1'),
++      ).rejects.toThrow(NotFoundException);
++    });
++
++    it('creates the reply and awards the configured XP', async () => {
++      prisma.forumPost.findUnique.mockResolvedValue(post);
++      prisma.forumReply.create.mockResolvedValue({ id: 'reply-1', contenu: 'Merci' });
++      prisma.platformSettings.findUnique.mockResolvedValue({
++        xpPerForumPost: 3,
++        xpPerForumReply: 1,
++      });
++
++      const result = await service.createReply('post-1', { contenu: 'Merci' }, 'user-1');
++
++      expect(prisma.user.update).toHaveBeenCalledWith({
++        where: { id: 'user-1' },
++        data: { xpTotal: { increment: 1 } },
++      });
++      expect(result.xpEarned).toBe(1);
++    });
++  });
++
++  describe('togglePostLike', () => {
++    it('likes a post that was not previously liked', async () => {
++      prisma.forumLike.findUnique.mockResolvedValue(null);
++
++      const result = await service.togglePostLike('post-1', 'user-1');
++
++      expect(prisma.forumLike.create).toHaveBeenCalledWith({
++        data: { userId: 'user-1', postId: 'post-1' },
++      });
++      expect(result).toEqual({ liked: true });
++    });
++
++    it('unlikes a post that was already liked', async () => {
++      prisma.forumLike.findUnique.mockResolvedValue({ id: 'like-1' });
++
++      const result = await service.togglePostLike('post-1', 'user-1');
++
++      expect(prisma.forumLike.delete).toHaveBeenCalledWith({
++        where: { userId_postId: { userId: 'user-1', postId: 'post-1' } },
++      });
++      expect(result).toEqual({ liked: false });
++    });
++  });
++
++  describe('reportPost', () => {
++    it('throws NotFoundException for an unknown post', async () => {
++      prisma.forumPost.findUnique.mockResolvedValue(null);
++      await expect(service.reportPost('missing')).rejects.toThrow(NotFoundException);
++    });
++
++    it('marks the post as reported', async () => {
++      prisma.forumPost.findUnique.mockResolvedValue(post);
++      prisma.forumPost.update.mockResolvedValue({ ...post, status: 'REPORTED' });
++
++      const result = await service.reportPost('post-1');
++
++      expect(prisma.forumPost.update).toHaveBeenCalledWith({
++        where: { id: 'post-1' },
++        data: { status: 'REPORTED' },
++      });
++      expect(result.status).toBe('REPORTED');
++    });
++  });
++});
+diff --git a/src/users/users.controller.spec.ts b/src/users/users.controller.spec.ts
+index 9871f5a..c4909ad 100644
+--- a/src/users/users.controller.spec.ts
++++ b/src/users/users.controller.spec.ts
+@@ -8,6 +8,7 @@ describe('UsersController', () => {
+     getProfile: jest.Mock;
+     updateProfile: jest.Mock;
+     getLeaderboard: jest.Mock;
++    getMyRank: jest.Mock;
+   };
+ 
+   const req = { user: { userId: 'user-1' } };
+@@ -17,6 +18,7 @@ describe('UsersController', () => {
+       getProfile: jest.fn(),
+       updateProfile: jest.fn(),
+       getLeaderboard: jest.fn(),
++      getMyRank: jest.fn(),
+     };
+ 
+     const module: TestingModule = await Test.createTestingModule({
+@@ -54,11 +56,37 @@ describe('UsersController', () => {
+     expect(result).toEqual({ id: 'user-1', ecole: 'IPEIT' });
+   });
+ 
+-  it('getLeaderboard forwards the optional filiere query param', async () => {
++  it('getLeaderboard forwards the optional filiere query param with the default global period', async () => {
+     usersService.getLeaderboard.mockResolvedValue([]);
+ 
+     await controller.getLeaderboard('MP');
+ 
+-    expect(usersService.getLeaderboard).toHaveBeenCalledWith('MP');
++    expect(usersService.getLeaderboard).toHaveBeenCalledWith('MP', 'global');
++  });
++
++  it('getLeaderboard forwards an explicit period', async () => {
++    usersService.getLeaderboard.mockResolvedValue([]);
++
++    await controller.getLeaderboard(undefined, 'semaine');
++
++    expect(usersService.getLeaderboard).toHaveBeenCalledWith(undefined, 'semaine');
++  });
++
++  // 6.2.3 — Tests de l'affichage du rang personnel
++  it('getMyRank delegates to the service with the authenticated user id, filiere, and period', async () => {
++    usersService.getMyRank.mockResolvedValue({ rank: 3, xpTotal: 90, total: 20, period: 'mois', filiere: 'MP' });
++
++    const result = await controller.getMyRank(req, 'MP', 'mois');
++
++    expect(usersService.getMyRank).toHaveBeenCalledWith('user-1', 'MP', 'mois');
++    expect(result.rank).toBe(3);
++  });
++
++  it('getMyRank defaults period to global when not provided', async () => {
++    usersService.getMyRank.mockResolvedValue({ rank: 1, xpTotal: 100, total: 5, period: 'global', filiere: null });
++
++    await controller.getMyRank(req);
++
++    expect(usersService.getMyRank).toHaveBeenCalledWith('user-1', undefined, 'global');
+   });
+ });
+diff --git a/src/users/users.controller.ts b/src/users/users.controller.ts
+index 387bee7..4c5f5e6 100644
+--- a/src/users/users.controller.ts
++++ b/src/users/users.controller.ts
+@@ -27,9 +27,24 @@ export class UsersController {
+     return this.usersService.updateProfile(req.user.userId, dto);
+   }
+ 
++  // GET /users/leaderboard?filiere=MP&period=semaine|mois|global
+   @UseGuards(JwtAuthGuard)
+   @Get('leaderboard')
+-  getLeaderboard(@Query('filiere') filiere?: string) {
+-    return this.usersService.getLeaderboard(filiere);
++  getLeaderboard(
++    @Query('filiere') filiere?: string,
++    @Query('period') period: string = 'global',
++  ) {
++    return this.usersService.getLeaderboard(filiere, period);
++  }
++
++  // GET /users/me/rank?filiere=MP&period=semaine|mois|global
++  @UseGuards(JwtAuthGuard)
++  @Get('me/rank')
++  getMyRank(
++    @Request() req: any,
++    @Query('filiere') filiere?: string,
++    @Query('period') period: string = 'global',
++  ) {
++    return this.usersService.getMyRank(req.user.userId, filiere, period);
+   }
+ }
+diff --git a/src/users/users.service.spec.ts b/src/users/users.service.spec.ts
+index b4c1eb6..63ec2cf 100644
+--- a/src/users/users.service.spec.ts
++++ b/src/users/users.service.spec.ts
+@@ -6,6 +6,7 @@ describe('UsersService', () => {
+   let service: UsersService;
+   let prisma: {
+     user: { findUnique: jest.Mock; update: jest.Mock; findMany: jest.Mock };
++    $queryRaw: jest.Mock;
+   };
+ 
+   const baseUser = {
+@@ -23,6 +24,7 @@ describe('UsersService', () => {
+   beforeEach(async () => {
+     prisma = {
+       user: { findUnique: jest.fn(), update: jest.fn(), findMany: jest.fn() },
++      $queryRaw: jest.fn(),
+     };
+ 
+     const module: TestingModule = await Test.createTestingModule({
+@@ -61,27 +63,113 @@ describe('UsersService', () => {
+     });
+   });
+ 
++  // 6.1 — Tests du classement et des filtres
+   describe('getLeaderboard', () => {
+-    it('returns the top users ordered by XP', async () => {
++    it('returns the top students ordered by XP for the global period', async () => {
+       prisma.user.findMany.mockResolvedValue([baseUser]);
+ 
+       const result = await service.getLeaderboard();
+ 
+       expect(prisma.user.findMany).toHaveBeenCalledWith(
+-        expect.objectContaining({ orderBy: { xpTotal: 'desc' }, take: 50 }),
++        expect.objectContaining({
++          where: { role: 'STUDENT' },
++          orderBy: { xpTotal: 'desc' },
++        }),
+       );
+       expect(result).toEqual([baseUser]);
+     });
+ 
+-    it('filters by filiere when provided', async () => {
++    it('filters by filiere when provided (global period)', async () => {
+       prisma.user.findMany.mockResolvedValue([baseUser]);
+ 
+       await service.getLeaderboard('MP');
+ 
+       expect(prisma.user.findMany).toHaveBeenCalledWith(
+-        expect.objectContaining({ where: { filiere: 'MP' } }),
++        expect.objectContaining({ where: { role: 'STUDENT', filiere: 'MP' } }),
++      );
++    });
++
++    it('caps the global leaderboard at 50 entries', async () => {
++      const many = Array.from({ length: 80 }, (_, i) => ({ ...baseUser, id: `u${i}` }));
++      prisma.user.findMany.mockResolvedValue(many);
++
++      const result = await service.getLeaderboard();
++
++      expect(result).toHaveLength(50);
++    });
++
++    // Previously the only supported filter was filiere — week/month didn't
++    // exist at all, so this branch (raw SQL summing XP earned since the
++    // period start) is new.
++    it('uses the raw period query when period is "semaine"', async () => {
++      prisma.$queryRaw.mockResolvedValue([
++        { id: 'user-1', nom: 'Bannour', prenom: 'Lina', filiere: 'MP', ecole: 'IPEIT', periodXp: 42n },
++      ]);
++
++      const result = await service.getLeaderboard(undefined, 'semaine');
++
++      expect(prisma.$queryRaw).toHaveBeenCalled();
++      expect(prisma.user.findMany).not.toHaveBeenCalled();
++      expect(result[0]).toEqual(
++        expect.objectContaining({ id: 'user-1', xpTotal: 42 }),
+       );
+     });
++
++    it('uses the raw period query when period is "mois"', async () => {
++      prisma.$queryRaw.mockResolvedValue([]);
++
++      await service.getLeaderboard('PC', 'mois');
++
++      expect(prisma.$queryRaw).toHaveBeenCalled();
++    });
++  });
++
++  // 6.2 — Tests de l'affichage du rang personnel
++  describe('getMyRank', () => {
++    it('returns the rank, xp, and total for a student in the global ranking', async () => {
++      prisma.user.findMany.mockResolvedValue([
++        { ...baseUser, id: 'user-0', xpTotal: 500 },
++        { ...baseUser, id: 'user-1', xpTotal: 120 },
++        { ...baseUser, id: 'user-2', xpTotal: 10 },
++      ]);
++
++      const result = await service.getMyRank('user-1');
++
++      expect(result).toEqual({
++        rank: 2,
++        xpTotal: 120,
++        total: 3,
++        period: 'global',
++        filiere: null,
++      });
++    });
++
++    it('returns rank null when the user is not in the ranking (e.g. filtered out by filiere)', async () => {
++      prisma.user.findMany.mockResolvedValue([{ ...baseUser, id: 'someone-else' }]);
++
++      const result = await service.getMyRank('user-1', 'PC');
++
++      expect(result.rank).toBeNull();
++      expect(result.total).toBe(1);
++      expect(result.filiere).toBe('PC');
++    });
++
++    it('uses the period ranking when a period is given', async () => {
++      prisma.$queryRaw.mockResolvedValue([
++        { id: 'user-1', nom: 'Bannour', prenom: 'Lina', filiere: 'MP', ecole: 'IPEIT', periodXp: 15n },
++      ]);
++
++      const result = await service.getMyRank('user-1', undefined, 'semaine');
++
++      expect(prisma.$queryRaw).toHaveBeenCalled();
++      expect(result).toEqual({
++        rank: 1,
++        xpTotal: 15,
++        total: 1,
++        period: 'semaine',
++        filiere: null,
++      });
++    });
+   });
+ 
+   // 3.1.3 — Tests de la mise à jour du profil
+diff --git a/src/users/users.service.ts b/src/users/users.service.ts
+index bac6121..4ec921f 100644
+--- a/src/users/users.service.ts
++++ b/src/users/users.service.ts
+@@ -1,7 +1,17 @@
+ import { Injectable } from '@nestjs/common';
++import { Prisma } from '@prisma/client';
+ import { PrismaService } from '../prisma/prisma.service';
+ import { UpdateProfileDto } from './dto/update-profile.dto';
+ 
++type RankedUser = {
++  id: string;
++  nom: string;
++  prenom: string;
++  filiere: string | null;
++  ecole: string | null;
++  xpTotal: number;
++};
++
+ @Injectable()
+ export class UsersService {
+   constructor(private prisma: PrismaService) {}
+@@ -45,21 +55,96 @@ export class UsersService {
+     });
+   }
+ 
+-  async getLeaderboard(filiere?: string) {
+-    return this.prisma.user.findMany({
+-      where: {
+-        ...(filiere && { filiere: filiere as any }),
+-      },
+-      select: {
+-        id: true,
+-        nom: true,
+-        prenom: true,
+-        filiere: true,
+-        ecole: true,
+-        xpTotal: true,
+-      },
+-      orderBy: { xpTotal: 'desc' },
+-      take: 50,
+-    });
++  private getPeriodStart(period: string): Date | null {
++    if (period !== 'semaine' && period !== 'mois') return null;
++    const now = new Date();
++    if (period === 'semaine') {
++      const day = now.getDay();
++      const diffToMonday = day === 0 ? 6 : day - 1;
++      return new Date(now.getFullYear(), now.getMonth(), now.getDate() - diffToMonday);
++    }
++    return new Date(now.getFullYear(), now.getMonth(), 1);
++  }
++
++  // Shared ranking used by both the leaderboard and the personal-rank lookup,
++  // so the two always agree on ordering and filters.
++  //
++  // Note: "semaine"/"mois" only sum XP from exercise attempts and contest
++  // answers, since those are the only XP sources with a timestamp to filter
++  // by — forum XP is added straight to xpTotal with no dated ledger. Global
++  // ranking uses xpTotal directly and so includes everything.
++  private async getRanking(filiere?: string, period: string = 'global'): Promise<RankedUser[]> {
++    const since = this.getPeriodStart(period);
++
++    if (!since) {
++      return this.prisma.user.findMany({
++        where: { role: 'STUDENT', ...(filiere && { filiere: filiere as any }) },
++        select: { id: true, nom: true, prenom: true, filiere: true, ecole: true, xpTotal: true },
++        orderBy: { xpTotal: 'desc' },
++      });
++    }
++
++    const filiereClause = filiere
++      ? Prisma.sql`AND u.filiere = ${filiere}::"Filiere"`
++      : Prisma.empty;
++
++    const rows = await this.prisma.$queryRaw<
++      Array<{
++        id: string;
++        nom: string;
++        prenom: string;
++        filiere: string | null;
++        ecole: string | null;
++        periodXp: bigint | number | null;
++      }>
++    >(Prisma.sql`
++      SELECT u.id, u.nom, u.prenom, u.filiere, u.ecole,
++        COALESCE(ex.xp, 0) + COALESCE(co.xp, 0) AS "periodXp"
++      FROM users u
++      LEFT JOIN (
++        SELECT "userId", SUM("xpEarned") AS xp FROM exercise_attempts
++        WHERE "createdAt" >= ${since} GROUP BY "userId"
++      ) ex ON ex."userId" = u.id
++      LEFT JOIN (
++        SELECT cs."userId" AS "userId", SUM(csa."xpEarned") AS xp
++        FROM contest_session_answers csa
++        JOIN contest_sessions cs ON cs.id = csa."sessionId"
++        WHERE csa."answeredAt" >= ${since}
++        GROUP BY cs."userId"
++      ) co ON co."userId" = u.id
++      WHERE u.role = 'STUDENT' ${filiereClause}
++      ORDER BY "periodXp" DESC
++    `);
++
++    return rows.map((r) => ({
++      id: r.id,
++      nom: r.nom,
++      prenom: r.prenom,
++      filiere: r.filiere,
++      ecole: r.ecole,
++      xpTotal: Number(r.periodXp ?? 0),
++    }));
++  }
++
++  // 6.1 — Leaderboard: global / by filière / by week / by month
++  async getLeaderboard(filiere?: string, period: string = 'global') {
++    const ranking = await this.getRanking(filiere, period);
++    return ranking.slice(0, 50);
++  }
++
++  // 6.2 — Personal rank within the current leaderboard view
++  async getMyRank(userId: string, filiere?: string, period: string = 'global') {
++    const ranking = await this.getRanking(filiere, period);
++    const index = ranking.findIndex((u) => u.id === userId);
++    if (index === -1) {
++      return { rank: null, xpTotal: 0, total: ranking.length, period, filiere: filiere ?? null };
++    }
++    return {
++      rank: index + 1,
++      xpTotal: ranking[index].xpTotal,
++      total: ranking.length,
++      period,
++      filiere: filiere ?? null,
++    };
+   }
+ }
+-- 
+2.43.0
+
