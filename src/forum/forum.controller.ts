@@ -1,4 +1,14 @@
-import { Controller, Get, Post, Patch, Param, Body, Query, UseGuards, Request } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Param,
+  Body,
+  Query,
+  UseGuards,
+  Request,
+} from '@nestjs/common';
 import { ForumService } from './forum.service';
 import { CreatePostDto, CreateReplyDto } from './dto/forum.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -10,14 +20,17 @@ export class ForumController {
 
   // GET /forum?matiere=MATHEMATIQUES
   @Get()
-  listPosts(@Query('matiere') matiere?: string) {
-    return this.forumService.listPosts(matiere);
+  listPosts(
+    @Query('matiere') matiere: string | undefined,
+    @Request() req: any,
+  ) {
+    return this.forumService.listPosts(matiere, req.user.userId);
   }
 
   // GET /forum/:id
   @Get(':id')
-  getPost(@Param('id') id: string) {
-    return this.forumService.getPost(id);
+  getPost(@Param('id') id: string, @Request() req: any) {
+    return this.forumService.getPost(id, req.user.userId);
   }
 
   // POST /forum

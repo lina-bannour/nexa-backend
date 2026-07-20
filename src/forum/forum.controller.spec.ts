@@ -37,16 +37,19 @@ describe('ForumController', () => {
     expect(controller).toBeDefined();
   });
 
-  it('listPosts forwards the optional matiere filter', async () => {
+  it('listPosts forwards the optional matiere filter and authenticated user id', async () => {
     forumService.listPosts.mockResolvedValue([]);
-    await controller.listPosts('MATHEMATIQUES');
-    expect(forumService.listPosts).toHaveBeenCalledWith('MATHEMATIQUES');
+    await controller.listPosts('MATHEMATIQUES', req);
+    expect(forumService.listPosts).toHaveBeenCalledWith(
+      'MATHEMATIQUES',
+      'user-1',
+    );
   });
 
-  it('getPost delegates to the service with the post id', async () => {
+  it('getPost delegates to the service with the post id and authenticated user id', async () => {
     forumService.getPost.mockResolvedValue({ id: 'post-1' });
-    const result = await controller.getPost('post-1');
-    expect(forumService.getPost).toHaveBeenCalledWith('post-1');
+    const result = await controller.getPost('post-1', req);
+    expect(forumService.getPost).toHaveBeenCalledWith('post-1', 'user-1');
     expect(result).toEqual({ id: 'post-1' });
   });
 
@@ -54,7 +57,7 @@ describe('ForumController', () => {
     const dto = { titre: 'Aide', contenu: '...', matiere: 'MATHEMATIQUES' };
     forumService.createPost.mockResolvedValue({ id: 'post-1', xpEarned: 3 });
 
-    const result = await controller.createPost(dto as any, req);
+    const result = await controller.createPost(dto, req);
 
     expect(forumService.createPost).toHaveBeenCalledWith(dto, 'user-1');
     expect(result.xpEarned).toBe(3);
@@ -64,9 +67,13 @@ describe('ForumController', () => {
     const dto = { contenu: 'Merci' };
     forumService.createReply.mockResolvedValue({ id: 'reply-1', xpEarned: 1 });
 
-    await controller.createReply('post-1', dto as any, req);
+    await controller.createReply('post-1', dto, req);
 
-    expect(forumService.createReply).toHaveBeenCalledWith('post-1', dto, 'user-1');
+    expect(forumService.createReply).toHaveBeenCalledWith(
+      'post-1',
+      dto,
+      'user-1',
+    );
   });
 
   it('toggleLike delegates to the service with the post id and authenticated user id', async () => {
@@ -74,12 +81,18 @@ describe('ForumController', () => {
 
     const result = await controller.toggleLike('post-1', req);
 
-    expect(forumService.togglePostLike).toHaveBeenCalledWith('post-1', 'user-1');
+    expect(forumService.togglePostLike).toHaveBeenCalledWith(
+      'post-1',
+      'user-1',
+    );
     expect(result).toEqual({ liked: true });
   });
 
   it('reportPost delegates to the service with the post id', async () => {
-    forumService.reportPost.mockResolvedValue({ id: 'post-1', status: 'REPORTED' });
+    forumService.reportPost.mockResolvedValue({
+      id: 'post-1',
+      status: 'REPORTED',
+    });
 
     const result = await controller.reportPost('post-1');
 

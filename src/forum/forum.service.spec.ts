@@ -18,7 +18,14 @@ describe('ForumService', () => {
     user: { update: jest.Mock };
   };
 
-  const post = { id: 'post-1', titre: 'Aide', contenu: '...', matiere: 'MATHEMATIQUES', status: 'PUBLISHED' };
+  const post = {
+    id: 'post-1',
+    titre: 'Aide',
+    contenu: '...',
+    matiere: 'MATHEMATIQUES',
+    status: 'PUBLISHED',
+    likes: [],
+  };
 
   beforeEach(async () => {
     prisma = {
@@ -29,7 +36,11 @@ describe('ForumService', () => {
         update: jest.fn(),
       },
       forumReply: { create: jest.fn() },
-      forumLike: { findUnique: jest.fn(), create: jest.fn(), delete: jest.fn() },
+      forumLike: {
+        findUnique: jest.fn(),
+        create: jest.fn(),
+        delete: jest.fn(),
+      },
       platformSettings: { findUnique: jest.fn() },
       user: { update: jest.fn() },
     };
@@ -50,18 +61,20 @@ describe('ForumService', () => {
     it('only returns published posts when no matiere filter is given', async () => {
       prisma.forumPost.findMany.mockResolvedValue([post]);
 
-      const result = await service.listPosts();
+      const result = await service.listPosts(undefined, 'user-1');
 
       expect(prisma.forumPost.findMany).toHaveBeenCalledWith(
         expect.objectContaining({ where: { status: 'PUBLISHED' } }),
       );
-      expect(result).toEqual([post]);
+      expect(result).toEqual([
+        expect.objectContaining({ id: 'post-1', likedByMe: false }),
+      ]);
     });
 
     it('filters by matiere when provided', async () => {
       prisma.forumPost.findMany.mockResolvedValue([post]);
 
-      await service.listPosts('MATHEMATIQUES');
+      await service.listPosts('MATHEMATIQUES', 'user-1');
 
       expect(prisma.forumPost.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -69,18 +82,32 @@ describe('ForumService', () => {
         }),
       );
     });
+
+    it('marks likedByMe true when the current user already liked the post', async () => {
+      prisma.forumPost.findMany.mockResolvedValue([
+        { ...post, likes: [{ id: 'like-1' }] },
+      ]);
+
+      const result = await service.listPosts(undefined, 'user-1');
+
+      expect(result[0].likedByMe).toBe(true);
+    });
   });
 
   describe('getPost', () => {
     it('throws NotFoundException for an unknown post', async () => {
       prisma.forumPost.findUnique.mockResolvedValue(null);
-      await expect(service.getPost('missing')).rejects.toThrow(NotFoundException);
+      await expect(service.getPost('missing', 'user-1')).rejects.toThrow(
+        NotFoundException,
+      );
     });
 
-    it('returns the post with its replies', async () => {
+    it('returns the post with its replies and likedByMe', async () => {
       prisma.forumPost.findUnique.mockResolvedValue({ ...post, replies: [] });
-      const result = await service.getPost('post-1');
-      expect(result).toEqual(expect.objectContaining({ id: 'post-1' }));
+      const result = await service.getPost('post-1', 'user-1');
+      expect(result).toEqual(
+        expect.objectContaining({ id: 'post-1', likedByMe: false }),
+      );
     });
   });
 
@@ -121,7 +148,9 @@ describe('ForumService', () => {
     // Settings lookup failing should never block the post itself.
     it('still creates the post if the settings lookup throws', async () => {
       prisma.forumPost.create.mockResolvedValue(post);
-      prisma.platformSettings.findUnique.mockRejectedValue(new Error('db down'));
+      prisma.platformSettings.findUnique.mockRejectedValue(
+        new Error('db down'),
+      );
 
       const result = await service.createPost(
         { titre: 'Aide', contenu: '...', matiere: 'MATHEMATIQUES' },
@@ -144,13 +173,20 @@ describe('ForumService', () => {
 
     it('creates the reply and awards the configured XP', async () => {
       prisma.forumPost.findUnique.mockResolvedValue(post);
-      prisma.forumReply.create.mockResolvedValue({ id: 'reply-1', contenu: 'Merci' });
+      prisma.forumReply.create.mockResolvedValue({
+        id: 'reply-1',
+        contenu: 'Merci',
+      });
       prisma.platformSettings.findUnique.mockResolvedValue({
         xpPerForumPost: 3,
         xpPerForumReply: 1,
       });
 
-      const result = await service.createReply('post-1', { contenu: 'Merci' }, 'user-1');
+      const result = await service.createReply(
+        'post-1',
+        { contenu: 'Merci' },
+        'user-1',
+      );
 
       expect(prisma.user.update).toHaveBeenCalledWith({
         where: { id: 'user-1' },
@@ -187,12 +223,17 @@ describe('ForumService', () => {
   describe('reportPost', () => {
     it('throws NotFoundException for an unknown post', async () => {
       prisma.forumPost.findUnique.mockResolvedValue(null);
-      await expect(service.reportPost('missing')).rejects.toThrow(NotFoundException);
+      await expect(service.reportPost('missing')).rejects.toThrow(
+        NotFoundException,
+      );
     });
 
     it('marks the post as reported', async () => {
       prisma.forumPost.findUnique.mockResolvedValue(post);
-      prisma.forumPost.update.mockResolvedValue({ ...post, status: 'REPORTED' });
+      prisma.forumPost.update.mockResolvedValue({
+        ...post,
+        status: 'REPORTED',
+      });
 
       const result = await service.reportPost('post-1');
 

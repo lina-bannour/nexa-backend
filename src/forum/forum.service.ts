@@ -7,26 +7,35 @@ export class ForumService {
   constructor(private prisma: PrismaService) {}
 
   // 7.1 — List posts with optional matiere filter
-  async listPosts(matiere?: string) {
-    return this.prisma.forumPost.findMany({
+  async listPosts(matiere: string | undefined, userId: string) {
+    const posts = await this.prisma.forumPost.findMany({
       where: {
         status: 'PUBLISHED',
         ...(matiere && { matiere: matiere as any }),
       },
       include: {
-        author: { select: { id: true, nom: true, prenom: true, filiere: true } },
+        author: {
+          select: { id: true, nom: true, prenom: true, filiere: true },
+        },
         _count: { select: { likes: true, replies: true } },
+        likes: { where: { userId }, select: { id: true } },
       },
       orderBy: { createdAt: 'desc' },
     });
+    return posts.map(({ likes, ...post }) => ({
+      ...post,
+      likedByMe: likes.length > 0,
+    }));
   }
 
   // Get one post with replies
-  async getPost(id: string) {
+  async getPost(id: string, userId: string) {
     const post = await this.prisma.forumPost.findUnique({
       where: { id },
       include: {
-        author: { select: { id: true, nom: true, prenom: true, filiere: true } },
+        author: {
+          select: { id: true, nom: true, prenom: true, filiere: true },
+        },
         replies: {
           include: {
             author: { select: { id: true, nom: true, prenom: true } },
@@ -35,10 +44,12 @@ export class ForumService {
           orderBy: { createdAt: 'asc' },
         },
         _count: { select: { likes: true, replies: true } },
+        likes: { where: { userId }, select: { id: true } },
       },
     });
     if (!post) throw new NotFoundException('Post not found');
-    return post;
+    const { likes, ...rest } = post;
+    return { ...rest, likedByMe: likes.length > 0 };
   }
 
   // Reads the admin-configured forum XP rewards (feature 12.2). Falls back to
@@ -47,7 +58,9 @@ export class ForumService {
   // config lookup.
   private async getForumXpRewards(): Promise<{ post: number; reply: number }> {
     try {
-      const settings = await this.prisma.platformSettings.findUnique({ where: { id: 1 } });
+      const settings = await this.prisma.platformSettings.findUnique({
+        where: { id: 1 },
+      });
       if (!settings) return { post: 0, reply: 0 };
       return {
         post: settings.xpPerForumPost ?? 0,
@@ -85,7 +98,9 @@ export class ForumService {
 
   // 7.3 — Add reply
   async createReply(postId: string, dto: CreateReplyDto, userId: string) {
-    const post = await this.prisma.forumPost.findUnique({ where: { id: postId } });
+    const post = await this.prisma.forumPost.findUnique({
+      where: { id: postId },
+    });
     if (!post) throw new NotFoundException('Post not found');
 
     const reply = await this.prisma.forumReply.create({
@@ -110,7 +125,9 @@ export class ForumService {
       where: { userId_postId: { userId, postId } },
     });
     if (existing) {
-      await this.prisma.forumLike.delete({ where: { userId_postId: { userId, postId } } });
+      await this.prisma.forumLike.delete({
+        where: { userId_postId: { userId, postId } },
+      });
       return { liked: false };
     }
     await this.prisma.forumLike.create({ data: { userId, postId } });
@@ -119,7 +136,9 @@ export class ForumService {
 
   // Report a post
   async reportPost(postId: string) {
-    const post = await this.prisma.forumPost.findUnique({ where: { id: postId } });
+    const post = await this.prisma.forumPost.findUnique({
+      where: { id: postId },
+    });
     if (!post) throw new NotFoundException('Post not found');
     return this.prisma.forumPost.update({
       where: { id: postId },
