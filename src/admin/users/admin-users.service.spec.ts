@@ -15,6 +15,7 @@ describe('AdminUsersService', () => {
       findUnique: jest.Mock;
       update: jest.Mock;
     };
+    exerciseAttempt: { count: jest.Mock };
   };
 
   const student = {
@@ -31,10 +32,14 @@ describe('AdminUsersService', () => {
   beforeEach(async () => {
     prisma = {
       user: { findMany: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
+      exerciseAttempt: { count: jest.fn() },
     };
 
     const module: TestingModule = await Test.createTestingModule({
-      providers: [AdminUsersService, { provide: PrismaService, useValue: prisma }],
+      providers: [
+        AdminUsersService,
+        { provide: PrismaService, useValue: prisma },
+      ],
     }).compile();
 
     service = module.get<AdminUsersService>(AdminUsersService);
@@ -42,6 +47,34 @@ describe('AdminUsersService', () => {
 
   it('should be defined', () => {
     expect(service).toBeDefined();
+  });
+
+  // 9.2.3 — Tests de la page de détail utilisateur
+  describe('findOne', () => {
+    it('throws NotFoundException for an unknown user', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+      await expect(service.findOne('missing')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('returns exercisesAttempted/exercisesSolved without the password hash', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        ...student,
+        passwordHash: 'hashed',
+        _count: { attempts: 12, contestSessions: 2, posts: 3 },
+      });
+      prisma.exerciseAttempt.count.mockResolvedValue(7);
+
+      const result = await service.findOne('user-1');
+
+      expect(prisma.exerciseAttempt.count).toHaveBeenCalledWith({
+        where: { userId: 'user-1', isCorrect: true },
+      });
+      expect(result).not.toHaveProperty('passwordHash');
+      expect(result.exercisesAttempted).toBe(12);
+      expect(result.exercisesSolved).toBe(7);
+    });
   });
 
   describe('updateStatus', () => {
@@ -56,7 +89,9 @@ describe('AdminUsersService', () => {
       prisma.user.findUnique.mockResolvedValue(student);
       prisma.user.update.mockResolvedValue({ ...student, status: 'SUSPENDED' });
 
-      const result = await service.updateStatus('user-1', { status: 'SUSPENDED' });
+      const result = await service.updateStatus('user-1', {
+        status: 'SUSPENDED',
+      });
 
       expect(prisma.user.update).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -98,7 +133,9 @@ describe('AdminUsersService', () => {
       prisma.user.findUnique.mockResolvedValue(student);
       prisma.user.update.mockResolvedValue({ ...student, role: 'ADMIN' });
 
-      const result = await service.updateRole('user-1', 'admin-1', { role: 'ADMIN' });
+      const result = await service.updateRole('user-1', 'admin-1', {
+        role: 'ADMIN',
+      });
 
       expect(prisma.user.update).toHaveBeenCalledWith(
         expect.objectContaining({

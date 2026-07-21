@@ -31,9 +31,17 @@ export class AdminUsersService {
         }),
       },
       select: {
-        id: true, email: true, nom: true, prenom: true,
-        role: true, status: true, ecole: true, filiere: true,
-        xpTotal: true, streak: true, createdAt: true,
+        id: true,
+        email: true,
+        nom: true,
+        prenom: true,
+        role: true,
+        status: true,
+        ecole: true,
+        filiere: true,
+        xpTotal: true,
+        streak: true,
+        createdAt: true,
         _count: { select: { attempts: true } },
       },
       orderBy: { xpTotal: 'desc' },
@@ -45,12 +53,24 @@ export class AdminUsersService {
     const user = await this.prisma.user.findUnique({
       where: { id },
       include: {
-        _count: { select: { attempts: true, contestSessions: true, posts: true } },
+        _count: {
+          select: { attempts: true, contestSessions: true, posts: true },
+        },
       },
     });
     if (!user) throw new NotFoundException('User not found');
+
+    const exercisesSolved = await this.prisma.exerciseAttempt.count({
+      where: { userId: id, isCorrect: true },
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { passwordHash, ...safe } = user;
-    return safe;
+    return {
+      ...safe,
+      exercisesAttempted: user._count.attempts,
+      exercisesSolved,
+    };
   }
 
   // 9.3.1 — Update user info
@@ -60,7 +80,15 @@ export class AdminUsersService {
     return this.prisma.user.update({
       where: { id },
       data: { ...dto, filiere: dto.filiere as any },
-      select: { id: true, nom: true, prenom: true, email: true, status: true, filiere: true, ecole: true },
+      select: {
+        id: true,
+        nom: true,
+        prenom: true,
+        email: true,
+        status: true,
+        filiere: true,
+        ecole: true,
+      },
     });
   }
 
