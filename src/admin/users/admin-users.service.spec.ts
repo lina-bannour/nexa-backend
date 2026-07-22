@@ -14,6 +14,7 @@ describe('AdminUsersService', () => {
       findMany: jest.Mock;
       findUnique: jest.Mock;
       update: jest.Mock;
+      count: jest.Mock;
     };
     exerciseAttempt: { count: jest.Mock };
   };
@@ -31,7 +32,7 @@ describe('AdminUsersService', () => {
 
   beforeEach(async () => {
     prisma = {
-      user: { findMany: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
+      user: { findMany: jest.fn(), findUnique: jest.fn(), update: jest.fn(), count: jest.fn() },
       exerciseAttempt: { count: jest.fn() },
     };
 
@@ -47,6 +48,46 @@ describe('AdminUsersService', () => {
 
   it('should be defined', () => {
     expect(service).toBeDefined();
+  });
+
+  // 9.1.2 — pagination on the student list
+  describe('findAll', () => {
+    it('defaults to page 1 / pageSize 20 and returns pagination metadata', async () => {
+      prisma.user.count.mockResolvedValue(45);
+      prisma.user.findMany.mockResolvedValue([student]);
+
+      const result = await service.findAll();
+
+      expect(prisma.user.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ skip: 0, take: 20 }),
+      );
+      expect(result).toEqual({
+        data: [student],
+        pagination: { page: 1, pageSize: 20, total: 45, totalPages: 3 },
+      });
+    });
+
+    it('computes skip from the requested page', async () => {
+      prisma.user.count.mockResolvedValue(45);
+      prisma.user.findMany.mockResolvedValue([]);
+
+      await service.findAll(undefined, undefined, undefined, 3, 20);
+
+      expect(prisma.user.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ skip: 40, take: 20 }),
+      );
+    });
+
+    it('clamps an out-of-range pageSize back to the default', async () => {
+      prisma.user.count.mockResolvedValue(5);
+      prisma.user.findMany.mockResolvedValue([]);
+
+      await service.findAll(undefined, undefined, undefined, 1, 500);
+
+      expect(prisma.user.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ take: 20 }),
+      );
+    });
   });
 
   // 9.2.3 — Tests de la page de détail utilisateur

@@ -37,12 +37,12 @@ describe('ContestsController', () => {
     expect(controller).toBeDefined();
   });
 
-  it('findAll forwards the filière filter', async () => {
+  it('findAll forwards the filière filter and authenticated user id', async () => {
     service.findAll.mockResolvedValue([]);
 
-    await controller.findAll('MP');
+    await controller.findAll('MP', req);
 
-    expect(service.findAll).toHaveBeenCalledWith('MP');
+    expect(service.findAll).toHaveBeenCalledWith('MP', 'user-1');
   });
 
   it('startSession passes the authenticated user id', async () => {

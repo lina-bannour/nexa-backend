@@ -30,8 +30,8 @@ export class ContestsController {
   // GET /contests?filiere=MP
   @UseGuards(JwtAuthGuard)
   @Get()
-  findAll(@Query('filiere') filiere?: string) {
-    return this.contestsService.findAll(filiere);
+  findAll(@Query('filiere') filiere: string | undefined, @Request() req: any) {
+    return this.contestsService.findAll(filiere, req.user.userId);
   }
 
   // Student: get one contest with questions

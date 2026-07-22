@@ -9,6 +9,7 @@ describe('ContestsService', () => {
     contest: { create: jest.Mock; findMany: jest.Mock; findUnique: jest.Mock };
     contestSession: {
       findFirst: jest.Mock;
+      findMany: jest.Mock;
       create: jest.Mock;
       findUnique: jest.Mock;
       update: jest.Mock;
@@ -50,6 +51,7 @@ describe('ContestsService', () => {
       },
       contestSession: {
         findFirst: jest.fn(),
+        findMany: jest.fn(),
         create: jest.fn(),
         findUnique: jest.fn(),
         update: jest.fn(),
@@ -76,6 +78,38 @@ describe('ContestsService', () => {
 
   it('should be defined', () => {
     expect(service).toBeDefined();
+  });
+
+  // Spec: returning to the contest list should show how many questions the
+  // student has already completed on each contest they've started.
+  describe('findAll', () => {
+    const contests = [
+      { id: 'contest-1', titre: 'A', annee: 2025, filiere: 'MP', matiere: 'MATHEMATIQUES', _count: { questions: 5 } },
+      { id: 'contest-2', titre: 'B', annee: 2024, filiere: 'MP', matiere: 'MATHEMATIQUES', _count: { questions: 3 } },
+    ];
+
+    it('returns contests without myProgress when no user id is given', async () => {
+      prisma.contest.findMany.mockResolvedValue(contests);
+
+      const result = await service.findAll();
+
+      expect(prisma.contestSession.findMany).not.toHaveBeenCalled();
+      expect(result).toEqual(contests);
+    });
+
+    it("attaches the caller's own session progress per contest", async () => {
+      prisma.contest.findMany.mockResolvedValue(contests);
+      prisma.contestSession.findMany.mockResolvedValue([
+        { contestId: 'contest-1', questionsCompleted: 2, xpTotal: 40, isCompleted: false },
+      ]);
+
+      const result = await service.findAll(undefined, 'user-1');
+
+      expect(result[0].myProgress).toEqual({
+        contestId: 'contest-1', questionsCompleted: 2, xpTotal: 40, isCompleted: false,
+      });
+      expect(result[1].myProgress).toBeNull();
+    });
   });
 
   describe('create', () => {

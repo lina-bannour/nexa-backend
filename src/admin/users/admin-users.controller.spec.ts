@@ -35,12 +35,20 @@ describe('AdminUsersController', () => {
     expect(controller).toBeDefined();
   });
 
-  it('findAll forwards search/status/ecole query params', async () => {
-    service.findAll.mockResolvedValue([]);
+  it('findAll forwards search/status/ecole with default pagination', async () => {
+    service.findAll.mockResolvedValue({ data: [], pagination: { page: 1, pageSize: 20, total: 0, totalPages: 1 } });
 
     await controller.findAll('lina', 'ACTIVE', 'IPEIT');
 
-    expect(service.findAll).toHaveBeenCalledWith('lina', 'ACTIVE', 'IPEIT');
+    expect(service.findAll).toHaveBeenCalledWith('lina', 'ACTIVE', 'IPEIT', 1, 20);
+  });
+
+  it('findAll forwards explicit page/pageSize query params', async () => {
+    service.findAll.mockResolvedValue({ data: [], pagination: { page: 2, pageSize: 10, total: 0, totalPages: 1 } });
+
+    await controller.findAll(undefined, undefined, undefined, '2', '10');
+
+    expect(service.findAll).toHaveBeenCalledWith(undefined, undefined, undefined, 2, 10);
   });
 
   it('updateRole passes the requesting admin id for the self-demotion check', async () => {

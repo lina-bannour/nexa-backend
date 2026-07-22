@@ -15,37 +15,63 @@ import {
 export class AdminUsersService {
   constructor(private prisma: PrismaService) {}
 
-  // 9.1 — List all students with filters
-  async findAll(search?: string, status?: string, ecole?: string) {
-    return this.prisma.user.findMany({
-      where: {
-        role: 'STUDENT',
-        ...(status && { status: status as any }),
-        ...(ecole && { ecole }),
-        ...(search && {
-          OR: [
-            { nom: { contains: search, mode: 'insensitive' } },
-            { prenom: { contains: search, mode: 'insensitive' } },
-            { email: { contains: search, mode: 'insensitive' } },
-          ],
-        }),
+  // 9.1 — List all students with filters + pagination
+  async findAll(
+    search?: string,
+    status?: string,
+    ecole?: string,
+    page = 1,
+    pageSize = 20,
+  ) {
+    const safePage = page > 0 ? page : 1;
+    const safePageSize = pageSize > 0 && pageSize <= 100 ? pageSize : 20;
+
+    const where = {
+      role: 'STUDENT' as const,
+      ...(status && { status: status as any }),
+      ...(ecole && { ecole }),
+      ...(search && {
+        OR: [
+          { nom: { contains: search, mode: 'insensitive' as const } },
+          { prenom: { contains: search, mode: 'insensitive' as const } },
+          { email: { contains: search, mode: 'insensitive' as const } },
+        ],
+      }),
+    };
+
+    const [total, data] = await Promise.all([
+      this.prisma.user.count({ where }),
+      this.prisma.user.findMany({
+        where,
+        select: {
+          id: true,
+          email: true,
+          nom: true,
+          prenom: true,
+          role: true,
+          status: true,
+          ecole: true,
+          filiere: true,
+          xpTotal: true,
+          streak: true,
+          createdAt: true,
+          _count: { select: { attempts: true } },
+        },
+        orderBy: { xpTotal: 'desc' },
+        skip: (safePage - 1) * safePageSize,
+        take: safePageSize,
+      }),
+    ]);
+
+    return {
+      data,
+      pagination: {
+        page: safePage,
+        pageSize: safePageSize,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / safePageSize)),
       },
-      select: {
-        id: true,
-        email: true,
-        nom: true,
-        prenom: true,
-        role: true,
-        status: true,
-        ecole: true,
-        filiere: true,
-        xpTotal: true,
-        streak: true,
-        createdAt: true,
-        _count: { select: { attempts: true } },
-      },
-      orderBy: { xpTotal: 'desc' },
-    });
+    };
   }
 
   // 9.2 — Get one student detail

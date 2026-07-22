@@ -29,9 +29,10 @@ export class ContestsService {
     });
   }
 
-  // ─── Student: List contests (grouped by year) ────────────────────────────
-  async findAll(filiere?: string) {
-    return this.prisma.contest.findMany({
+  // ─── Student: List contests (grouped by year), with the caller's own
+  // progress on each one if they've started it ────────────────────────────
+  async findAll(filiere?: string, userId?: string) {
+    const contests = await this.prisma.contest.findMany({
       where: { ...(filiere && { filiere: filiere as any }) },
       select: {
         id: true,
@@ -43,6 +44,19 @@ export class ContestsService {
       },
       orderBy: { annee: 'desc' },
     });
+
+    if (!userId) return contests;
+
+    const sessions = await this.prisma.contestSession.findMany({
+      where: { userId, contestId: { in: contests.map((c) => c.id) } },
+      select: { contestId: true, questionsCompleted: true, xpTotal: true, isCompleted: true },
+    });
+    const byContest = new Map(sessions.map((s) => [s.contestId, s]));
+
+    return contests.map((c) => ({
+      ...c,
+      myProgress: byContest.get(c.id) ?? null,
+    }));
   }
 
   // ─── Student: Get one contest with questions (no correct answers) ─────────

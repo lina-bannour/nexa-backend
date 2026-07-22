@@ -30,8 +30,16 @@ export class AdminUsersController {
     @Query('search') search?: string,
     @Query('status') status?: string,
     @Query('ecole') ecole?: string,
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
   ) {
-    return this.adminUsersService.findAll(search, status, ecole);
+    return this.adminUsersService.findAll(
+      search,
+      status,
+      ecole,
+      page ? parseInt(page, 10) : 1,
+      pageSize ? parseInt(pageSize, 10) : 20,
+    );
   }
 
   @Get(':id')
