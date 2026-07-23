@@ -56,7 +56,7 @@ export class DashboardService {
 
       // Daily activity last 7 days
       this.prisma.$queryRaw<{ date: string; count: number }[]>`
-        SELECT DATE("createdAt") as date, COUNT(*) as count
+        SELECT DATE("createdAt") as date, COUNT(*)::int as count
         FROM exercise_attempts
         WHERE "createdAt" >= NOW() - INTERVAL '7 days'
         GROUP BY DATE("createdAt")
@@ -65,7 +65,7 @@ export class DashboardService {
 
       // Registrations last 7 days
       this.prisma.$queryRaw<{ date: string; count: number }[]>`
-        SELECT DATE("createdAt") as date, COUNT(*) as count
+        SELECT DATE("createdAt") as date, COUNT(*)::int as count
         FROM users
         WHERE role = 'STUDENT' AND "createdAt" >= NOW() - INTERVAL '7 days'
         GROUP BY DATE("createdAt")
