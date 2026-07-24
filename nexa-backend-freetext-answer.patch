@@ -1,0 +1,557 @@
+From 9b19174cfec7a893c37971720ae0c9d31aed73e6 Mon Sep 17 00:00:00 2001
+From: Claude <claude@anthropic.com>
+Date: Fri, 24 Jul 2026 19:42:44 +0000
+Subject: [PATCH] feat: free-text-first answer flow for exercises and contest
+ questions
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+New spec: exercises/contest questions shouldn't jump straight to multiple
+choice. The student first types their own answer; only after failing gets
+the existing hint + multiple-choice flow. This adds the piece needed to
+make that possible without touching the existing hint/XP system at all.
+
+- Added an optional Exercise.reponseTexte / ContestQuestion.reponseTexte
+  field (nullable — content without it skips straight to the existing QCM
+  flow, so this is fully backward compatible with everything already
+  built).
+- GET /exercises/:id and GET /contests/:id now expose only a
+  hasReponseTexte boolean, never the actual text — the correct answer
+  string is never sent to the client until it's been earned.
+- New POST /exercises/:id/check-answer and
+  POST /contests/sessions/:sessionId/questions/:questionId/check-answer:
+  case/whitespace-insensitive exact match against the stored text,
+  server-side only.
+  - Correct: records the attempt, awards full XP (no hints have been shown
+    yet at this point, so no penalty), returns the solution — mirrors
+    submitAnswer's bookkeeping exactly.
+  - Wrong (exercises): recorded as a failed ExerciseAttempt for the same
+    analytics reasons wrong QCM submissions already are.
+  - Wrong (contests): deliberately NOT recorded. ContestSessionAnswer has
+    a unique [sessionId, questionId] constraint — writing a row for a
+    wrong guess would permanently block the real submission for that
+    question. Only a correct guess ever writes a row.
+- Admin exercise/contest-question forms get a new optional "Réponse
+  attendue (texte libre)" field, flowing through the existing DTOs with
+  no other backend plumbing needed (both create/update paths already
+  spread the DTO into the Prisma write).
+
+175/175 tests passing (20/20 suites): findOne leak checks (never exposes
+the raw text), correct/incorrect matching with normalization, the
+no-row-on-wrong-guess contest behavior specifically, and unconfigured
+(null) exercises/questions correctly rejecting the check-answer call.
+---
+ prisma/schema.prisma                        |  5 ++
+ src/admin/content/dto/update-content.dto.ts |  2 +
+ src/contests/contests.controller.ts         | 19 ++++-
+ src/contests/contests.service.spec.ts       | 70 ++++++++++++++++
+ src/contests/contests.service.ts            | 93 ++++++++++++++++++++-
+ src/contests/dto/contest.dto.ts             |  5 ++
+ src/exercises/dto/check-text-answer.dto.ts  |  7 ++
+ src/exercises/dto/create-exercise.dto.ts    |  6 ++
+ src/exercises/exercises.controller.ts       | 12 +++
+ src/exercises/exercises.service.spec.ts     | 73 ++++++++++++++++
+ src/exercises/exercises.service.ts          | 47 ++++++++++-
+ 11 files changed, 336 insertions(+), 3 deletions(-)
+ create mode 100644 src/exercises/dto/check-text-answer.dto.ts
+
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index 82d8737..47bcfcc 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -85,6 +85,9 @@ model Exercise {
+   hint4             String?    @db.Text
+   solutionDetaillee String     @db.Text
+   xpBase            Int        @default(10)
++  // Optional free-text answer for the "guess before you see the choices"
++  // phase. Null means the exercise skips straight to multiple choice.
++  reponseTexte      String?    @db.Text
+ 
+   choix    ExerciseChoice[]
+   attempts ExerciseAttempt[]
+@@ -148,6 +151,8 @@ model ContestQuestion {
+   hint4             String? @db.Text
+   solutionDetaillee String  @db.Text
+   xpBase            Int     @default(10)
++  // Same free-text pre-check phase as Exercise.reponseTexte.
++  reponseTexte      String? @db.Text
+ 
+   choix   ContestQuestionChoice[]
+   answers ContestSessionAnswer[]
+diff --git a/src/admin/content/dto/update-content.dto.ts b/src/admin/content/dto/update-content.dto.ts
+index 7733b4b..5e0e376 100644
+--- a/src/admin/content/dto/update-content.dto.ts
++++ b/src/admin/content/dto/update-content.dto.ts
+@@ -31,6 +31,7 @@ export class UpdateExerciseDto {
+   @IsOptional() @IsString() hint2?: string;
+   @IsOptional() @IsString() hint3?: string;
+   @IsOptional() @IsString() hint4?: string;
++  @IsOptional() @IsString() reponseTexte?: string;
+   // When provided, replaces all existing choices for this exercise.
+   @IsOptional()
+   @IsArray()
+@@ -48,6 +49,7 @@ export class UpdateContestQuestionDto {
+   @IsOptional() @IsString() hint2?: string;
+   @IsOptional() @IsString() hint3?: string;
+   @IsOptional() @IsString() hint4?: string;
++  @IsOptional() @IsString() reponseTexte?: string;
+   @IsArray() @ValidateNested({ each: true }) @Type(() => UpdateChoiceDto)
+   choix: UpdateChoiceDto[];
+ }
+diff --git a/src/contests/contests.controller.ts b/src/contests/contests.controller.ts
+index 32534ca..d172471 100644
+--- a/src/contests/contests.controller.ts
++++ b/src/contests/contests.controller.ts
+@@ -9,7 +9,7 @@ import {
+   Request,
+ } from '@nestjs/common';
+ import { ContestsService } from './contests.service';
+-import { CreateContestDto, SubmitContestAnswerDto } from './dto/contest.dto';
++import { CreateContestDto, SubmitContestAnswerDto, CheckContestTextAnswerDto } from './dto/contest.dto';
+ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+ import { RolesGuard } from '../auth/roles.guard';
+ import { Roles } from '../auth/roles.decorator';
+@@ -48,6 +48,23 @@ export class ContestsController {
+     return this.contestsService.startSession(id, req.user.userId);
+   }
+ 
++  // Student: check a free-text guess before choices are ever revealed
++  @UseGuards(JwtAuthGuard)
++  @Post('sessions/:sessionId/questions/:questionId/check-answer')
++  checkTextAnswer(
++    @Param('sessionId') sessionId: string,
++    @Param('questionId') questionId: string,
++    @Body() dto: CheckContestTextAnswerDto,
++    @Request() req: any,
++  ) {
++    return this.contestsService.checkTextAnswer(
++      sessionId,
++      questionId,
++      req.user.userId,
++      dto.text,
++    );
++  }
++
+   // Student: submit answer for a question
+   @UseGuards(JwtAuthGuard)
+   @Post('sessions/:sessionId/questions/:questionId/submit')
+diff --git a/src/contests/contests.service.spec.ts b/src/contests/contests.service.spec.ts
+index abc8c6b..e1cbd4d 100644
+--- a/src/contests/contests.service.spec.ts
++++ b/src/contests/contests.service.spec.ts
+@@ -80,6 +80,76 @@ describe('ContestsService', () => {
+     expect(service).toBeDefined();
+   });
+ 
++  describe('findOne', () => {
++    it('never leaks raw reponseTexte, only a boolean flag per question', async () => {
++      prisma.contest.findUnique.mockResolvedValue({
++        id: 'contest-1',
++        questions: [{ ...question, reponseTexte: 'answer text' }],
++      });
++
++      const result = await service.findOne('contest-1');
++
++      expect(result.questions[0]).not.toHaveProperty('reponseTexte');
++      expect(result.questions[0].hasReponseTexte).toBe(true);
++    });
++  });
++
++  describe('checkTextAnswer', () => {
++    const questionWithText = { ...question, reponseTexte: '  Racine de 2  ' };
++
++    it('throws NotFoundException for an unknown session', async () => {
++      prisma.contestSession.findUnique.mockResolvedValue(null);
++      await expect(
++        service.checkTextAnswer('missing', 'q-1', 'user-1', 'x'),
++      ).rejects.toThrow(NotFoundException);
++    });
++
++    it('throws if the question has no free-text answer configured', async () => {
++      prisma.contestSession.findUnique.mockResolvedValue(session);
++      prisma.contestQuestion.findUnique.mockResolvedValue({ ...question, reponseTexte: null });
++
++      await expect(
++        service.checkTextAnswer('session-1', 'q-1', 'user-1', 'x'),
++      ).rejects.toThrow(BadRequestException);
++    });
++
++    it('does not write any row for a wrong guess (would block the real submission)', async () => {
++      prisma.contestSession.findUnique.mockResolvedValue(session);
++      prisma.contestQuestion.findUnique.mockResolvedValue(questionWithText);
++      prisma.contestSessionAnswer.findUnique.mockResolvedValue(null);
++
++      const result = await service.checkTextAnswer('session-1', 'q-1', 'user-1', 'wrong');
++
++      expect(result).toEqual({ correct: false });
++      expect(prisma.contestSessionAnswer.create).not.toHaveBeenCalled();
++      expect(prisma.user.update).not.toHaveBeenCalled();
++    });
++
++    it('records the answer and awards full XP on a correct guess, matching normal submission bookkeeping', async () => {
++      prisma.contestSession.findUnique.mockResolvedValue(session);
++      prisma.contestQuestion.findUnique.mockResolvedValue(questionWithText);
++      prisma.contestSessionAnswer.findUnique.mockResolvedValue(null);
++      prisma.contestSessionAnswer.count.mockResolvedValue(1);
++
++      const result = await service.checkTextAnswer('session-1', 'q-1', 'user-1', 'racine   DE 2');
++
++      expect(result).toEqual({
++        correct: true, xpEarned: 100, solution: 'La solution...',
++        questionsCompleted: 1, totalQuestions: 1, isCompleted: true,
++      });
++      expect(prisma.contestSessionAnswer.create).toHaveBeenCalledWith({
++        data: {
++          sessionId: 'session-1', questionId: 'q-1',
++          selectedChoiceId: null, isCorrect: true, hintsUsed: 0, xpEarned: 100,
++        },
++      });
++      expect(prisma.user.update).toHaveBeenCalledWith({
++        where: { id: 'user-1' },
++        data: { xpTotal: { increment: 100 } },
++      });
++    });
++  });
++
+   // Spec: returning to the contest list should show how many questions the
+   // student has already completed on each contest they've started.
+   describe('findAll', () => {
+diff --git a/src/contests/contests.service.ts b/src/contests/contests.service.ts
+index 5aff21f..95fbab7 100644
+--- a/src/contests/contests.service.ts
++++ b/src/contests/contests.service.ts
+@@ -73,7 +73,15 @@ export class ContestsService {
+       },
+     });
+     if (!contest) throw new NotFoundException('Contest not found');
+-    return contest;
++    // Never send the actual free-text answer to the client — only whether
++    // one exists, per question.
++    return {
++      ...contest,
++      questions: contest.questions.map(({ reponseTexte, ...q }) => ({
++        ...q,
++        hasReponseTexte: !!reponseTexte,
++      })),
++    };
+   }
+ 
+   // ─── Student: Start or resume session ────────────────────────────────────
+@@ -96,6 +104,89 @@ export class ContestsService {
+     });
+   }
+ 
++  // ─── Student: Free-text guess, checked before choices are ever shown ──────
++  // Only writes a ContestSessionAnswer row on a correct guess — a wrong
++  // guess must NOT be recorded, since sessionId+questionId is unique and
++  // would otherwise permanently block the real (QCM) submission for this
++  // question.
++  async checkTextAnswer(
++    sessionId: string,
++    questionId: string,
++    userId: string,
++    text: string,
++  ) {
++    const session = await this.prisma.contestSession.findUnique({
++      where: { id: sessionId },
++      include: { contest: { include: { questions: true } } },
++    });
++    if (!session) throw new NotFoundException('Session not found');
++    if (session.userId !== userId) throw new BadRequestException('Unauthorized');
++    if (session.isCompleted) throw new BadRequestException('Session already completed');
++
++    const question = await this.prisma.contestQuestion.findUnique({
++      where: { id: questionId },
++    });
++    if (!question) throw new NotFoundException('Question not found');
++    if (!question.reponseTexte) {
++      throw new BadRequestException('This question has no free-text answer configured');
++    }
++
++    const alreadyAnswered = await this.prisma.contestSessionAnswer.findUnique({
++      where: { sessionId_questionId: { sessionId, questionId } },
++    });
++    if (alreadyAnswered) throw new BadRequestException('Already answered');
++
++    const normalize = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
++    const isCorrect = normalize(text) === normalize(question.reponseTexte);
++
++    if (!isCorrect) {
++      return { correct: false };
++    }
++
++    // Correct — record it exactly like submitAnswer would, with full XP
++    // since no hints have been shown yet.
++    const xpEarned = question.xpBase;
++
++    await this.prisma.contestSessionAnswer.create({
++      data: {
++        sessionId,
++        questionId,
++        selectedChoiceId: null,
++        isCorrect: true,
++        hintsUsed: 0,
++        xpEarned,
++      },
++    });
++
++    const totalQuestions = session.contest.questions.length;
++    const answeredCount = await this.prisma.contestSessionAnswer.count({ where: { sessionId } });
++    const isCompleted = answeredCount >= totalQuestions;
++
++    await this.prisma.contestSession.update({
++      where: { id: sessionId },
++      data: {
++        questionsCompleted: answeredCount,
++        xpTotal: { increment: xpEarned },
++        isCompleted,
++        completedAt: isCompleted ? new Date() : undefined,
++      },
++    });
++
++    await this.prisma.user.update({
++      where: { id: userId },
++      data: { xpTotal: { increment: xpEarned } },
++    });
++
++    return {
++      correct: true,
++      xpEarned,
++      solution: question.solutionDetaillee,
++      questionsCompleted: answeredCount,
++      totalQuestions,
++      isCompleted,
++    };
++  }
++
+   // ─── Student: Submit answer for one question ──────────────────────────────
+   async submitAnswer(
+     sessionId: string,
+diff --git a/src/contests/dto/contest.dto.ts b/src/contests/dto/contest.dto.ts
+index 0429027..34d66be 100644
+--- a/src/contests/dto/contest.dto.ts
++++ b/src/contests/dto/contest.dto.ts
+@@ -18,6 +18,7 @@ export class CreateContestQuestionDto {
+   @IsOptional() @IsString() hint2?: string;
+   @IsOptional() @IsString() hint3?: string;
+   @IsOptional() @IsString() hint4?: string;
++  @IsOptional() @IsString() reponseTexte?: string;
+   @IsArray() @ValidateNested({ each: true }) @Type(() => CreateContestChoiceDto)
+   choix: CreateContestChoiceDto[];
+ }
+@@ -35,4 +36,8 @@ export class CreateContestDto {
+ export class SubmitContestAnswerDto {
+   @IsString() @IsNotEmpty() choiceId: string;
+   @IsInt() @Min(0) hintsUsed: number;
++}
++
++export class CheckContestTextAnswerDto {
++  @IsString() @IsNotEmpty() text: string;
+ }
+\ No newline at end of file
+diff --git a/src/exercises/dto/check-text-answer.dto.ts b/src/exercises/dto/check-text-answer.dto.ts
+new file mode 100644
+index 0000000..28fe62d
+--- /dev/null
++++ b/src/exercises/dto/check-text-answer.dto.ts
+@@ -0,0 +1,7 @@
++import { IsString, IsNotEmpty } from 'class-validator';
++
++export class CheckTextAnswerDto {
++  @IsString()
++  @IsNotEmpty()
++  text: string;
++}
+diff --git a/src/exercises/dto/create-exercise.dto.ts b/src/exercises/dto/create-exercise.dto.ts
+index a668ac1..d95c54e 100644
+--- a/src/exercises/dto/create-exercise.dto.ts
++++ b/src/exercises/dto/create-exercise.dto.ts
+@@ -59,6 +59,12 @@ export class CreateExerciseDto {
+   @IsString()
+   hint4?: string;
+ 
++  // If provided, students first get a free-text attempt before the
++  // multiple-choice options are ever revealed.
++  @IsOptional()
++  @IsString()
++  reponseTexte?: string;
++
+   @IsArray()
+   @ValidateNested({ each: true })
+   @Type(() => CreateChoiceDto)
+diff --git a/src/exercises/exercises.controller.ts b/src/exercises/exercises.controller.ts
+index 328d255..cdf87fa 100644
+--- a/src/exercises/exercises.controller.ts
++++ b/src/exercises/exercises.controller.ts
+@@ -12,6 +12,7 @@ import {
+ import { ExercisesService } from './exercises.service';
+ import { CreateExerciseDto } from './dto/create-exercise.dto';
+ import { SubmitAnswerDto } from './dto/submit-answer.dto';
++import { CheckTextAnswerDto } from './dto/check-text-answer.dto';
+ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+ import { RolesGuard } from '../auth/roles.guard';
+ import { Roles } from '../auth/roles.decorator';
+@@ -46,6 +47,17 @@ export class ExercisesController {
+     return this.exercisesService.findOne(id);
+   }
+ 
++  // Student: check a free-text guess before choices are ever revealed
++  @UseGuards(JwtAuthGuard)
++  @Post(':id/check-answer')
++  checkTextAnswer(
++    @Param('id') id: string,
++    @Body() dto: CheckTextAnswerDto,
++    @Request() req: any,
++  ) {
++    return this.exercisesService.checkTextAnswer(id, req.user.userId, dto.text);
++  }
++
+   // Student: submit answer
+   @UseGuards(JwtAuthGuard)
+   @Post(':id/submit')
+diff --git a/src/exercises/exercises.service.spec.ts b/src/exercises/exercises.service.spec.ts
+index a74c243..416a0c7 100644
+--- a/src/exercises/exercises.service.spec.ts
++++ b/src/exercises/exercises.service.spec.ts
+@@ -55,6 +55,79 @@ describe('ExercisesService', () => {
+     expect(service).toBeDefined();
+   });
+ 
++  // Free-text "guess before you see the choices" phase
++  describe('findOne', () => {
++    it('never leaks the raw reponseTexte, only a boolean flag', async () => {
++      prisma.exercise.findUnique.mockResolvedValue({
++        ...exercise,
++        reponseTexte: 'la bonne réponse',
++        choix: [{ id: 'c1', label: 'A' }],
++      });
++
++      const result = await service.findOne('ex-1');
++
++      expect(result).not.toHaveProperty('reponseTexte');
++      expect(result.hasReponseTexte).toBe(true);
++    });
++
++    it('reports hasReponseTexte as false when none is configured', async () => {
++      prisma.exercise.findUnique.mockResolvedValue({
++        ...exercise,
++        reponseTexte: null,
++        choix: [],
++      });
++
++      const result = await service.findOne('ex-1');
++
++      expect(result.hasReponseTexte).toBe(false);
++    });
++  });
++
++  describe('checkTextAnswer', () => {
++    const exerciseWithText = { ...exercise, reponseTexte: '  Racine de 2  ' };
++
++    it('throws if the exercise has no free-text answer configured', async () => {
++      prisma.exercise.findUnique.mockResolvedValue({ ...exercise, reponseTexte: null });
++
++      await expect(service.checkTextAnswer('ex-1', 'user-1', 'anything')).rejects.toThrow(
++        BadRequestException,
++      );
++    });
++
++    it('matches case- and whitespace-insensitively, awards full XP, and records the attempt', async () => {
++      prisma.exercise.findUnique.mockResolvedValue(exerciseWithText);
++
++      const result = await service.checkTextAnswer('ex-1', 'user-1', 'racine   DE 2');
++
++      expect(result).toEqual({ correct: true, xpEarned: 100, solution: 'La solution...' });
++      expect(prisma.exerciseAttempt.create).toHaveBeenCalledWith({
++        data: {
++          userId: 'user-1', exerciseId: 'ex-1',
++          selectedChoiceId: null, isCorrect: true, hintsUsed: 0, xpEarned: 100,
++        },
++      });
++      expect(prisma.user.update).toHaveBeenCalledWith({
++        where: { id: 'user-1' },
++        data: { xpTotal: { increment: 100 } },
++      });
++    });
++
++    it('records a failed guess without awarding XP, and never reveals the solution', async () => {
++      prisma.exercise.findUnique.mockResolvedValue(exerciseWithText);
++
++      const result = await service.checkTextAnswer('ex-1', 'user-1', 'wrong guess');
++
++      expect(result).toEqual({ correct: false });
++      expect(prisma.exerciseAttempt.create).toHaveBeenCalledWith({
++        data: {
++          userId: 'user-1', exerciseId: 'ex-1',
++          selectedChoiceId: null, isCorrect: false, hintsUsed: 0, xpEarned: 0,
++        },
++      });
++      expect(prisma.user.update).not.toHaveBeenCalled();
++    });
++  });
++
+   // 10.1.3 — Tests de la création d'exercice
+   describe('create', () => {
+     it('creates an exercise with its choices in one call', async () => {
+diff --git a/src/exercises/exercises.service.ts b/src/exercises/exercises.service.ts
+index a51dc07..962f151 100644
+--- a/src/exercises/exercises.service.ts
++++ b/src/exercises/exercises.service.ts
+@@ -61,7 +61,52 @@ export class ExercisesService {
+       },
+     });
+     if (!exercise) throw new NotFoundException('Exercise not found');
+-    return exercise;
++    // Never send the actual free-text answer to the client — only whether
++    // one exists, so the frontend knows whether to show the "guess first"
++    // phase before the multiple-choice options.
++    const { reponseTexte, ...rest } = exercise;
++    return { ...rest, hasReponseTexte: !!reponseTexte };
++  }
++
++  // ─── Student: Free-text guess, checked before choices are ever shown ──────
++  async checkTextAnswer(exerciseId: string, userId: string, text: string) {
++    const exercise = await this.prisma.exercise.findUnique({
++      where: { id: exerciseId },
++    });
++    if (!exercise) throw new NotFoundException('Exercise not found');
++    if (!exercise.reponseTexte) {
++      throw new BadRequestException('This exercise has no free-text answer configured');
++    }
++
++    const normalize = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
++    const isCorrect = normalize(text) === normalize(exercise.reponseTexte);
++
++    // A correct free-text guess always earns full XP — no hints have been
++    // shown yet at this point, so there's no penalty to apply.
++    const xpEarned = isCorrect ? exercise.xpBase : 0;
++
++    await this.prisma.exerciseAttempt.create({
++      data: {
++        userId,
++        exerciseId,
++        selectedChoiceId: null,
++        isCorrect,
++        hintsUsed: 0,
++        xpEarned,
++      },
++    });
++
++    if (isCorrect && xpEarned > 0) {
++      await this.prisma.user.update({
++        where: { id: userId },
++        data: { xpTotal: { increment: xpEarned } },
++      });
++    }
++
++    return {
++      correct: isCorrect,
++      ...(isCorrect && { xpEarned, solution: exercise.solutionDetaillee }),
++    };
+   }
+ 
+   // ─── Student: Submit answer ───────────────────────────────────────────────
+-- 
+2.43.0
+

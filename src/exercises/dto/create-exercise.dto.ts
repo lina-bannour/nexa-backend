@@ -59,6 +59,12 @@ export class CreateExerciseDto {
   @IsString()
   hint4?: string;
 
+  // If provided, students first get a free-text attempt before the
+  // multiple-choice options are ever revealed.
+  @IsOptional()
+  @IsString()
+  reponseTexte?: string;
+
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => CreateChoiceDto)

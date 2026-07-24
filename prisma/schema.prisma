@@ -85,6 +85,9 @@ model Exercise {
   hint4             String?    @db.Text
   solutionDetaillee String     @db.Text
   xpBase            Int        @default(10)
+  // Optional free-text answer for the "guess before you see the choices"
+  // phase. Null means the exercise skips straight to multiple choice.
+  reponseTexte      String?    @db.Text
 
   choix    ExerciseChoice[]
   attempts ExerciseAttempt[]
@@ -148,6 +151,8 @@ model ContestQuestion {
   hint4             String? @db.Text
   solutionDetaillee String  @db.Text
   xpBase            Int     @default(10)
+  // Same free-text pre-check phase as Exercise.reponseTexte.
+  reponseTexte      String? @db.Text
 
   choix   ContestQuestionChoice[]
   answers ContestSessionAnswer[]

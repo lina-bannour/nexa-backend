@@ -31,6 +31,7 @@ export class UpdateExerciseDto {
   @IsOptional() @IsString() hint2?: string;
   @IsOptional() @IsString() hint3?: string;
   @IsOptional() @IsString() hint4?: string;
+  @IsOptional() @IsString() reponseTexte?: string;
   // When provided, replaces all existing choices for this exercise.
   @IsOptional()
   @IsArray()
@@ -48,6 +49,7 @@ export class UpdateContestQuestionDto {
   @IsOptional() @IsString() hint2?: string;
   @IsOptional() @IsString() hint3?: string;
   @IsOptional() @IsString() hint4?: string;
+  @IsOptional() @IsString() reponseTexte?: string;
   @IsArray() @ValidateNested({ each: true }) @Type(() => UpdateChoiceDto)
   choix: UpdateChoiceDto[];
 }

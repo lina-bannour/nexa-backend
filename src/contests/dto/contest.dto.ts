@@ -18,6 +18,7 @@ export class CreateContestQuestionDto {
   @IsOptional() @IsString() hint2?: string;
   @IsOptional() @IsString() hint3?: string;
   @IsOptional() @IsString() hint4?: string;
+  @IsOptional() @IsString() reponseTexte?: string;
   @IsArray() @ValidateNested({ each: true }) @Type(() => CreateContestChoiceDto)
   choix: CreateContestChoiceDto[];
 }
@@ -35,4 +36,8 @@ export class CreateContestDto {
 export class SubmitContestAnswerDto {
   @IsString() @IsNotEmpty() choiceId: string;
   @IsInt() @Min(0) hintsUsed: number;
+}
+
+export class CheckContestTextAnswerDto {
+  @IsString() @IsNotEmpty() text: string;
 }

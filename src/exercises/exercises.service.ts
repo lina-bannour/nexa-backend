@@ -61,7 +61,52 @@ export class ExercisesService {
       },
     });
     if (!exercise) throw new NotFoundException('Exercise not found');
-    return exercise;
+    // Never send the actual free-text answer to the client — only whether
+    // one exists, so the frontend knows whether to show the "guess first"
+    // phase before the multiple-choice options.
+    const { reponseTexte, ...rest } = exercise;
+    return { ...rest, hasReponseTexte: !!reponseTexte };
+  }
+
+  // ─── Student: Free-text guess, checked before choices are ever shown ──────
+  async checkTextAnswer(exerciseId: string, userId: string, text: string) {
+    const exercise = await this.prisma.exercise.findUnique({
+      where: { id: exerciseId },
+    });
+    if (!exercise) throw new NotFoundException('Exercise not found');
+    if (!exercise.reponseTexte) {
+      throw new BadRequestException('This exercise has no free-text answer configured');
+    }
+
+    const normalize = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
+    const isCorrect = normalize(text) === normalize(exercise.reponseTexte);
+
+    // A correct free-text guess always earns full XP — no hints have been
+    // shown yet at this point, so there's no penalty to apply.
+    const xpEarned = isCorrect ? exercise.xpBase : 0;
+
+    await this.prisma.exerciseAttempt.create({
+      data: {
+        userId,
+        exerciseId,
+        selectedChoiceId: null,
+        isCorrect,
+        hintsUsed: 0,
+        xpEarned,
+      },
+    });
+
+    if (isCorrect && xpEarned > 0) {
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: { xpTotal: { increment: xpEarned } },
+      });
+    }
+
+    return {
+      correct: isCorrect,
+      ...(isCorrect && { xpEarned, solution: exercise.solutionDetaillee }),
+    };
   }
 
   // ─── Student: Submit answer ───────────────────────────────────────────────

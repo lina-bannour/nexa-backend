@@ -73,7 +73,15 @@ export class ContestsService {
       },
     });
     if (!contest) throw new NotFoundException('Contest not found');
-    return contest;
+    // Never send the actual free-text answer to the client — only whether
+    // one exists, per question.
+    return {
+      ...contest,
+      questions: contest.questions.map(({ reponseTexte, ...q }) => ({
+        ...q,
+        hasReponseTexte: !!reponseTexte,
+      })),
+    };
   }
 
   // ─── Student: Start or resume session ────────────────────────────────────
@@ -94,6 +102,89 @@ export class ContestsService {
       data: { userId, contestId },
       include: { answers: true },
     });
+  }
+
+  // ─── Student: Free-text guess, checked before choices are ever shown ──────
+  // Only writes a ContestSessionAnswer row on a correct guess — a wrong
+  // guess must NOT be recorded, since sessionId+questionId is unique and
+  // would otherwise permanently block the real (QCM) submission for this
+  // question.
+  async checkTextAnswer(
+    sessionId: string,
+    questionId: string,
+    userId: string,
+    text: string,
+  ) {
+    const session = await this.prisma.contestSession.findUnique({
+      where: { id: sessionId },
+      include: { contest: { include: { questions: true } } },
+    });
+    if (!session) throw new NotFoundException('Session not found');
+    if (session.userId !== userId) throw new BadRequestException('Unauthorized');
+    if (session.isCompleted) throw new BadRequestException('Session already completed');
+
+    const question = await this.prisma.contestQuestion.findUnique({
+      where: { id: questionId },
+    });
+    if (!question) throw new NotFoundException('Question not found');
+    if (!question.reponseTexte) {
+      throw new BadRequestException('This question has no free-text answer configured');
+    }
+
+    const alreadyAnswered = await this.prisma.contestSessionAnswer.findUnique({
+      where: { sessionId_questionId: { sessionId, questionId } },
+    });
+    if (alreadyAnswered) throw new BadRequestException('Already answered');
+
+    const normalize = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
+    const isCorrect = normalize(text) === normalize(question.reponseTexte);
+
+    if (!isCorrect) {
+      return { correct: false };
+    }
+
+    // Correct — record it exactly like submitAnswer would, with full XP
+    // since no hints have been shown yet.
+    const xpEarned = question.xpBase;
+
+    await this.prisma.contestSessionAnswer.create({
+      data: {
+        sessionId,
+        questionId,
+        selectedChoiceId: null,
+        isCorrect: true,
+        hintsUsed: 0,
+        xpEarned,
+      },
+    });
+
+    const totalQuestions = session.contest.questions.length;
+    const answeredCount = await this.prisma.contestSessionAnswer.count({ where: { sessionId } });
+    const isCompleted = answeredCount >= totalQuestions;
+
+    await this.prisma.contestSession.update({
+      where: { id: sessionId },
+      data: {
+        questionsCompleted: answeredCount,
+        xpTotal: { increment: xpEarned },
+        isCompleted,
+        completedAt: isCompleted ? new Date() : undefined,
+      },
+    });
+
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { xpTotal: { increment: xpEarned } },
+    });
+
+    return {
+      correct: true,
+      xpEarned,
+      solution: question.solutionDetaillee,
+      questionsCompleted: answeredCount,
+      totalQuestions,
+      isCompleted,
+    };
   }
 
   // ─── Student: Submit answer for one question ──────────────────────────────

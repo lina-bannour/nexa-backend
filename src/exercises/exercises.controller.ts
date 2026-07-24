@@ -12,6 +12,7 @@ import {
 import { ExercisesService } from './exercises.service';
 import { CreateExerciseDto } from './dto/create-exercise.dto';
 import { SubmitAnswerDto } from './dto/submit-answer.dto';
+import { CheckTextAnswerDto } from './dto/check-text-answer.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
@@ -44,6 +45,17 @@ export class ExercisesController {
   @Get(':id')
   findOne(@Param('id') id: string) {
     return this.exercisesService.findOne(id);
+  }
+
+  // Student: check a free-text guess before choices are ever revealed
+  @UseGuards(JwtAuthGuard)
+  @Post(':id/check-answer')
+  checkTextAnswer(
+    @Param('id') id: string,
+    @Body() dto: CheckTextAnswerDto,
+    @Request() req: any,
+  ) {
+    return this.exercisesService.checkTextAnswer(id, req.user.userId, dto.text);
   }
 
   // Student: submit answer

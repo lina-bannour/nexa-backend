@@ -55,6 +55,79 @@ describe('ExercisesService', () => {
     expect(service).toBeDefined();
   });
 
+  // Free-text "guess before you see the choices" phase
+  describe('findOne', () => {
+    it('never leaks the raw reponseTexte, only a boolean flag', async () => {
+      prisma.exercise.findUnique.mockResolvedValue({
+        ...exercise,
+        reponseTexte: 'la bonne réponse',
+        choix: [{ id: 'c1', label: 'A' }],
+      });
+
+      const result = await service.findOne('ex-1');
+
+      expect(result).not.toHaveProperty('reponseTexte');
+      expect(result.hasReponseTexte).toBe(true);
+    });
+
+    it('reports hasReponseTexte as false when none is configured', async () => {
+      prisma.exercise.findUnique.mockResolvedValue({
+        ...exercise,
+        reponseTexte: null,
+        choix: [],
+      });
+
+      const result = await service.findOne('ex-1');
+
+      expect(result.hasReponseTexte).toBe(false);
+    });
+  });
+
+  describe('checkTextAnswer', () => {
+    const exerciseWithText = { ...exercise, reponseTexte: '  Racine de 2  ' };
+
+    it('throws if the exercise has no free-text answer configured', async () => {
+      prisma.exercise.findUnique.mockResolvedValue({ ...exercise, reponseTexte: null });
+
+      await expect(service.checkTextAnswer('ex-1', 'user-1', 'anything')).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('matches case- and whitespace-insensitively, awards full XP, and records the attempt', async () => {
+      prisma.exercise.findUnique.mockResolvedValue(exerciseWithText);
+
+      const result = await service.checkTextAnswer('ex-1', 'user-1', 'racine   DE 2');
+
+      expect(result).toEqual({ correct: true, xpEarned: 100, solution: 'La solution...' });
+      expect(prisma.exerciseAttempt.create).toHaveBeenCalledWith({
+        data: {
+          userId: 'user-1', exerciseId: 'ex-1',
+          selectedChoiceId: null, isCorrect: true, hintsUsed: 0, xpEarned: 100,
+        },
+      });
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'user-1' },
+        data: { xpTotal: { increment: 100 } },
+      });
+    });
+
+    it('records a failed guess without awarding XP, and never reveals the solution', async () => {
+      prisma.exercise.findUnique.mockResolvedValue(exerciseWithText);
+
+      const result = await service.checkTextAnswer('ex-1', 'user-1', 'wrong guess');
+
+      expect(result).toEqual({ correct: false });
+      expect(prisma.exerciseAttempt.create).toHaveBeenCalledWith({
+        data: {
+          userId: 'user-1', exerciseId: 'ex-1',
+          selectedChoiceId: null, isCorrect: false, hintsUsed: 0, xpEarned: 0,
+        },
+      });
+      expect(prisma.user.update).not.toHaveBeenCalled();
+    });
+  });
+
   // 10.1.3 — Tests de la création d'exercice
   describe('create', () => {
     it('creates an exercise with its choices in one call', async () => {

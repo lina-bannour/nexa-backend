@@ -80,6 +80,76 @@ describe('ContestsService', () => {
     expect(service).toBeDefined();
   });
 
+  describe('findOne', () => {
+    it('never leaks raw reponseTexte, only a boolean flag per question', async () => {
+      prisma.contest.findUnique.mockResolvedValue({
+        id: 'contest-1',
+        questions: [{ ...question, reponseTexte: 'answer text' }],
+      });
+
+      const result = await service.findOne('contest-1');
+
+      expect(result.questions[0]).not.toHaveProperty('reponseTexte');
+      expect(result.questions[0].hasReponseTexte).toBe(true);
+    });
+  });
+
+  describe('checkTextAnswer', () => {
+    const questionWithText = { ...question, reponseTexte: '  Racine de 2  ' };
+
+    it('throws NotFoundException for an unknown session', async () => {
+      prisma.contestSession.findUnique.mockResolvedValue(null);
+      await expect(
+        service.checkTextAnswer('missing', 'q-1', 'user-1', 'x'),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('throws if the question has no free-text answer configured', async () => {
+      prisma.contestSession.findUnique.mockResolvedValue(session);
+      prisma.contestQuestion.findUnique.mockResolvedValue({ ...question, reponseTexte: null });
+
+      await expect(
+        service.checkTextAnswer('session-1', 'q-1', 'user-1', 'x'),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('does not write any row for a wrong guess (would block the real submission)', async () => {
+      prisma.contestSession.findUnique.mockResolvedValue(session);
+      prisma.contestQuestion.findUnique.mockResolvedValue(questionWithText);
+      prisma.contestSessionAnswer.findUnique.mockResolvedValue(null);
+
+      const result = await service.checkTextAnswer('session-1', 'q-1', 'user-1', 'wrong');
+
+      expect(result).toEqual({ correct: false });
+      expect(prisma.contestSessionAnswer.create).not.toHaveBeenCalled();
+      expect(prisma.user.update).not.toHaveBeenCalled();
+    });
+
+    it('records the answer and awards full XP on a correct guess, matching normal submission bookkeeping', async () => {
+      prisma.contestSession.findUnique.mockResolvedValue(session);
+      prisma.contestQuestion.findUnique.mockResolvedValue(questionWithText);
+      prisma.contestSessionAnswer.findUnique.mockResolvedValue(null);
+      prisma.contestSessionAnswer.count.mockResolvedValue(1);
+
+      const result = await service.checkTextAnswer('session-1', 'q-1', 'user-1', 'racine   DE 2');
+
+      expect(result).toEqual({
+        correct: true, xpEarned: 100, solution: 'La solution...',
+        questionsCompleted: 1, totalQuestions: 1, isCompleted: true,
+      });
+      expect(prisma.contestSessionAnswer.create).toHaveBeenCalledWith({
+        data: {
+          sessionId: 'session-1', questionId: 'q-1',
+          selectedChoiceId: null, isCorrect: true, hintsUsed: 0, xpEarned: 100,
+        },
+      });
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'user-1' },
+        data: { xpTotal: { increment: 100 } },
+      });
+    });
+  });
+
   // Spec: returning to the contest list should show how many questions the
   // student has already completed on each contest they've started.
   describe('findAll', () => {
