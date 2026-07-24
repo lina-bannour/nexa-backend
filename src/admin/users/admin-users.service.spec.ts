@@ -32,7 +32,12 @@ describe('AdminUsersService', () => {
 
   beforeEach(async () => {
     prisma = {
-      user: { findMany: jest.fn(), findUnique: jest.fn(), update: jest.fn(), count: jest.fn() },
+      user: {
+        findMany: jest.fn(),
+        findUnique: jest.fn(),
+        update: jest.fn(),
+        count: jest.fn(),
+      },
       exerciseAttempt: { count: jest.fn() },
     };
 
@@ -86,6 +91,19 @@ describe('AdminUsersService', () => {
 
       expect(prisma.user.findMany).toHaveBeenCalledWith(
         expect.objectContaining({ take: 20 }),
+      );
+    });
+
+    it('filters by filiere when provided', async () => {
+      prisma.user.count.mockResolvedValue(0);
+      prisma.user.findMany.mockResolvedValue([]);
+
+      await service.findAll(undefined, undefined, undefined, 1, 20, 'MP');
+
+      expect(prisma.user.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ filiere: 'MP' }),
+        }),
       );
     });
   });

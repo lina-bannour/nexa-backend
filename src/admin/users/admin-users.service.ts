@@ -22,6 +22,7 @@ export class AdminUsersService {
     ecole?: string,
     page = 1,
     pageSize = 20,
+    filiere?: string,
   ) {
     const safePage = page > 0 ? page : 1;
     const safePageSize = pageSize > 0 && pageSize <= 100 ? pageSize : 20;
@@ -30,6 +31,7 @@ export class AdminUsersService {
       role: 'STUDENT' as const,
       ...(status && { status: status as any }),
       ...(ecole && { ecole }),
+      ...(filiere && { filiere: filiere as any }),
       ...(search && {
         OR: [
           { nom: { contains: search, mode: 'insensitive' as const } },

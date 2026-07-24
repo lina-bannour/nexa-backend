@@ -32,6 +32,7 @@ export class AdminUsersController {
     @Query('ecole') ecole?: string,
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
+    @Query('filiere') filiere?: string,
   ) {
     return this.adminUsersService.findAll(
       search,
@@ -39,6 +40,7 @@ export class AdminUsersController {
       ecole,
       page ? parseInt(page, 10) : 1,
       pageSize ? parseInt(pageSize, 10) : 20,
+      filiere,
     );
   }
 
