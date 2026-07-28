@@ -82,8 +82,11 @@ export class ExercisesService {
     const isCorrect = normalize(text) === normalize(exercise.reponseTexte);
 
     // A correct free-text guess always earns full XP — no hints have been
-    // shown yet at this point, so there's no penalty to apply.
-    const xpEarned = isCorrect ? exercise.xpBase : 0;
+    // shown yet at this point, so there's no penalty to apply. It also
+    // earns the configurable "direct answer" bonus (feature 12.2) since
+    // this is, by definition, an unaided direct answer.
+    const directBonus = isCorrect ? await this.getDirectAnswerBonus() : 0;
+    const xpEarned = isCorrect ? exercise.xpBase + directBonus : 0;
 
     await this.prisma.exerciseAttempt.create({
       data: {
@@ -127,8 +130,12 @@ export class ExercisesService {
     const penaltyPercent =
       penalties[dto.hintsUsed] ?? penalties[penalties.length - 1];
     const isCorrect = selectedChoice.isCorrect;
+    // A zero-hint correct answer also earns the configurable "direct
+    // answer" bonus, on top of the exercise's own XP barème.
+    const directBonus =
+      isCorrect && dto.hintsUsed === 0 ? await this.getDirectAnswerBonus() : 0;
     const xpEarned = isCorrect
-      ? Math.floor(exercise.xpBase * (1 - penaltyPercent / 100))
+      ? Math.floor(exercise.xpBase * (1 - penaltyPercent / 100)) + directBonus
       : 0;
 
     // Save attempt
@@ -189,6 +196,21 @@ export class ExercisesService {
       ];
     } catch {
       return [0, 10, 20, 30, 40];
+    }
+  }
+
+  // Reads the admin-configured "direct answer" XP bonus (feature 12.2) —
+  // awarded on top of the exercise's own barème when a student answers
+  // correctly with zero hints used. Was previously saved by the settings
+  // form but never actually read anywhere; this wires it up.
+  private async getDirectAnswerBonus(): Promise<number> {
+    try {
+      const settings = await this.prisma.platformSettings.findUnique({
+        where: { id: 1 },
+      });
+      return settings?.xpPerDirectAnswer ?? 10;
+    } catch {
+      return 10;
     }
   }
 }

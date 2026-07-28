@@ -125,7 +125,7 @@ describe('ContestsService', () => {
       expect(prisma.user.update).not.toHaveBeenCalled();
     });
 
-    it('records the answer and awards full XP on a correct guess, matching normal submission bookkeeping', async () => {
+    it('records the answer and awards full XP plus the direct-answer bonus on a correct guess, matching normal submission bookkeeping', async () => {
       prisma.contestSession.findUnique.mockResolvedValue(session);
       prisma.contestQuestion.findUnique.mockResolvedValue(questionWithText);
       prisma.contestSessionAnswer.findUnique.mockResolvedValue(null);
@@ -133,19 +133,20 @@ describe('ContestsService', () => {
 
       const result = await service.checkTextAnswer('session-1', 'q-1', 'user-1', 'racine   DE 2');
 
+      // 100 (xpBase) + 10 (default xpPerDirectAnswer bonus, no settings configured)
       expect(result).toEqual({
-        correct: true, xpEarned: 100, solution: 'La solution...',
+        correct: true, xpEarned: 110, solution: 'La solution...',
         questionsCompleted: 1, totalQuestions: 1, isCompleted: true,
       });
       expect(prisma.contestSessionAnswer.create).toHaveBeenCalledWith({
         data: {
           sessionId: 'session-1', questionId: 'q-1',
-          selectedChoiceId: null, isCorrect: true, hintsUsed: 0, xpEarned: 100,
+          selectedChoiceId: null, isCorrect: true, hintsUsed: 0, xpEarned: 110,
         },
       });
       expect(prisma.user.update).toHaveBeenCalledWith({
         where: { id: 'user-1' },
-        data: { xpTotal: { increment: 100 } },
+        data: { xpTotal: { increment: 110 } },
       });
     });
   });
@@ -305,7 +306,7 @@ describe('ContestsService', () => {
       ).rejects.toThrow(BadRequestException);
     });
 
-    it('awards XP for a correct answer and marks the session completed when it was the last question', async () => {
+    it('awards full XP plus the direct-answer bonus and marks the session completed when it was the last question', async () => {
       prisma.contestSession.findUnique.mockResolvedValue(session);
       prisma.contestQuestion.findUnique.mockResolvedValue(question);
       prisma.contestSessionAnswer.findUnique.mockResolvedValue(null);
@@ -317,7 +318,8 @@ describe('ContestsService', () => {
       });
 
       expect(result.isCorrect).toBe(true);
-      expect(result.xpEarned).toBe(100);
+      // 100 (xpBase) + 10 (default xpPerDirectAnswer bonus, no settings configured)
+      expect(result.xpEarned).toBe(110);
       expect(result.isCompleted).toBe(true);
       expect(prisma.contestSession.update).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -327,8 +329,29 @@ describe('ContestsService', () => {
       );
       expect(prisma.user.update).toHaveBeenCalledWith({
         where: { id: 'user-1' },
-        data: { xpTotal: { increment: 100 } },
+        data: { xpTotal: { increment: 110 } },
       });
+    });
+
+    it('does not award the direct-answer bonus once any hint was used', async () => {
+      prisma.contestSession.findUnique.mockResolvedValue(session);
+      prisma.contestQuestion.findUnique.mockResolvedValue(question);
+      prisma.contestSessionAnswer.findUnique.mockResolvedValue(null);
+      prisma.contestSessionAnswer.count.mockResolvedValue(1);
+      prisma.platformSettings.findUnique.mockResolvedValue({
+        xpPerDirectAnswer: 25,
+        hintPenaltyPercent1: 10,
+        hintPenaltyPercent2: 20,
+        hintPenaltyPercent3: 30,
+        hintPenaltyPercent4: 40,
+      });
+
+      const result = await service.submitAnswer('session-1', 'q-1', 'user-1', {
+        choiceId: 'choice-correct',
+        hintsUsed: 1,
+      });
+
+      expect(result.xpEarned).toBe(90); // 100 * (1 - 10/100), no bonus
     });
 
     it('does not award XP for an incorrect answer', async () => {

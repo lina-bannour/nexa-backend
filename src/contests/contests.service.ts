@@ -144,8 +144,10 @@ export class ContestsService {
     }
 
     // Correct — record it exactly like submitAnswer would, with full XP
-    // since no hints have been shown yet.
-    const xpEarned = question.xpBase;
+    // since no hints have been shown yet, plus the configurable "direct
+    // answer" bonus (feature 12.2).
+    const directBonus = await this.getDirectAnswerBonus();
+    const xpEarned = question.xpBase + directBonus;
 
     await this.prisma.contestSessionAnswer.create({
       data: {
@@ -223,8 +225,12 @@ export class ContestsService {
     const penalties = await this.getHintPenalties();
     const penalty = penalties[dto.hintsUsed] ?? penalties[penalties.length - 1];
     const isCorrect = selectedChoice.isCorrect;
+    // A zero-hint correct answer also earns the configurable "direct
+    // answer" bonus, on top of the question's own XP barème.
+    const directBonus =
+      isCorrect && dto.hintsUsed === 0 ? await this.getDirectAnswerBonus() : 0;
     const xpEarned = isCorrect
-      ? Math.floor(question.xpBase * (1 - penalty / 100))
+      ? Math.floor(question.xpBase * (1 - penalty / 100)) + directBonus
       : 0;
 
     // Save answer
@@ -307,6 +313,20 @@ export class ContestsService {
       ];
     } catch {
       return [0, 10, 20, 30, 40];
+    }
+  }
+
+  // Reads the admin-configured "direct answer" XP bonus (feature 12.2) —
+  // awarded on top of the question's own barème when a student answers
+  // correctly with zero hints used. Mirrors exercises.service.ts.
+  private async getDirectAnswerBonus(): Promise<number> {
+    try {
+      const settings = await this.prisma.platformSettings.findUnique({
+        where: { id: 1 },
+      });
+      return settings?.xpPerDirectAnswer ?? 10;
+    } catch {
+      return 10;
     }
   }
 }
