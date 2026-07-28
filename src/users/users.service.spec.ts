@@ -6,6 +6,7 @@ describe('UsersService', () => {
   let service: UsersService;
   let prisma: {
     user: { findUnique: jest.Mock; update: jest.Mock; findMany: jest.Mock };
+    contestSession: { count: jest.Mock };
     $queryRaw: jest.Mock;
   };
 
@@ -17,6 +18,7 @@ describe('UsersService', () => {
     filiere: 'MP',
     ecole: 'IPEIT',
     xpTotal: 120,
+    streak: 4,
     role: 'STUDENT',
     createdAt: new Date('2026-01-01'),
   };
@@ -24,6 +26,7 @@ describe('UsersService', () => {
   beforeEach(async () => {
     prisma = {
       user: { findUnique: jest.fn(), update: jest.fn(), findMany: jest.fn() },
+      contestSession: { count: jest.fn() },
       $queryRaw: jest.fn(),
     };
 
@@ -40,11 +43,12 @@ describe('UsersService', () => {
 
   // 3.2.3 — Tests d'affichage des données du profil
   describe('getProfile', () => {
-    it('returns the profile with attempts count for the given user', async () => {
+    it('returns the profile with attempts/posts counts and contestsCompleted', async () => {
       prisma.user.findUnique.mockResolvedValue({
         ...baseUser,
-        _count: { attempts: 8 },
+        _count: { attempts: 8, posts: 2 },
       });
+      prisma.contestSession.count.mockResolvedValue(3);
 
       const result = await service.getProfile('user-1');
 
@@ -52,14 +56,31 @@ describe('UsersService', () => {
         where: { id: 'user-1' },
         select: expect.objectContaining({
           xpTotal: true,
+          streak: true,
           filiere: true,
           ecole: true,
-          _count: { select: { attempts: true } },
+          _count: { select: { attempts: true, posts: true } },
         }),
       });
+      expect(prisma.contestSession.count).toHaveBeenCalledWith({
+        where: { userId: 'user-1', isCompleted: true },
+      });
       expect(result).toEqual(
-        expect.objectContaining({ xpTotal: 120, filiere: 'MP' }),
+        expect.objectContaining({
+          xpTotal: 120,
+          filiere: 'MP',
+          contestsCompleted: 3,
+        }),
       );
+    });
+
+    it('returns null for an unknown user without querying contest sessions', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+      prisma.contestSession.count.mockResolvedValue(0);
+
+      const result = await service.getProfile('missing');
+
+      expect(result).toBeNull();
     });
   });
 

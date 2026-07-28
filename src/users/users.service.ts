@@ -17,21 +17,31 @@ export class UsersService {
   constructor(private prisma: PrismaService) {}
 
   async getProfile(userId: string) {
-    return this.prisma.user.findUnique({
-      where: { id: userId },
-      select: {
-        id: true,
-        email: true,
-        nom: true,
-        prenom: true,
-        filiere: true,
-        ecole: true,
-        xpTotal: true,
-        role: true,
-        createdAt: true,
-        _count: { select: { attempts: true } },
-      },
-    });
+    const [user, contestsCompleted] = await Promise.all([
+      this.prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          id: true,
+          email: true,
+          nom: true,
+          prenom: true,
+          filiere: true,
+          ecole: true,
+          xpTotal: true,
+          streak: true,
+          role: true,
+          createdAt: true,
+          _count: { select: { attempts: true, posts: true } },
+        },
+      }),
+      // Used by the "Progression" checklist on the profile screen — has the
+      // student ever finished a contest, not just started one.
+      this.prisma.contestSession.count({
+        where: { userId, isCompleted: true },
+      }),
+    ]);
+    if (!user) return null;
+    return { ...user, contestsCompleted };
   }
 
   async updateProfile(userId: string, dto: UpdateProfileDto) {
