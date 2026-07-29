@@ -293,6 +293,42 @@ export class ContestsService {
     return session;
   }
 
+  // ─── "Solve on paper, submit a photo" mode (alternative to the QCM) ──────
+  // The student solves the whole contest offline, then uploads a photo of
+  // their work here. This just stores the submission as PENDING — the
+  // actual review/grading workflow (an admin screen to look at the photo
+  // and mark it reviewed, with a score/note) is a separate piece of work,
+  // not built here.
+
+  async createPhotoSubmission(
+    contestId: string,
+    userId: string,
+    imageBase64: string,
+  ) {
+    const contest = await this.prisma.contest.findUnique({
+      where: { id: contestId },
+    });
+    if (!contest) throw new NotFoundException('Contest not found');
+
+    // Stored inline as a data URL for now — swapping this for a real
+    // object-storage upload (S3 / Cloud Storage) and storing just the
+    // resulting URL is a natural next step, but out of scope here.
+    const imageUrl = imageBase64.startsWith('data:')
+      ? imageBase64
+      : `data:image/jpeg;base64,${imageBase64}`;
+
+    return this.prisma.contestPhotoSubmission.create({
+      data: { contestId, userId, imageUrl },
+    });
+  }
+
+  async getMyPhotoSubmission(contestId: string, userId: string) {
+    return this.prisma.contestPhotoSubmission.findFirst({
+      where: { contestId, userId },
+      orderBy: { submittedAt: 'desc' },
+    });
+  }
+
   // Reads the admin-configured hint penalties (feature 12.2). Falls back to
   // the previous hardcoded defaults if settings haven't been configured yet,
   // or if the settings row can't be reached.

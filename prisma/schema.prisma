@@ -45,6 +45,15 @@ enum PostStatus {
   REMOVED
 }
 
+// Solve-on-paper-then-submit-a-photo mode for contests (alternative to the
+// interactive QCM mode). Grading/review of the photo is handled by a
+// separate admin workflow — not built here, this just gets the submission
+// stored and queryable.
+enum PhotoSubmissionStatus {
+  PENDING
+  REVIEWED
+}
+
 model User {
   id           String     @id @default(uuid())
   email        String     @unique
@@ -61,6 +70,7 @@ model User {
 
   attempts        ExerciseAttempt[]
   contestSessions ContestSession[]
+  photoSubmissions ContestPhotoSubmission[]
   posts           ForumPost[]
   replies         ForumReply[]
   likes           ForumLike[]
@@ -132,6 +142,7 @@ model Contest {
 
   questions ContestQuestion[]
   sessions  ContestSession[]
+  photoSubmissions ContestPhotoSubmission[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -186,6 +197,27 @@ model ContestSession {
   answers ContestSessionAnswer[]
 
   @@map("contest_sessions")
+}
+
+// A student solving the whole contest on paper and submitting a photo of
+// their work, instead of the interactive QCM mode. Storage here is a plain
+// URL (upload target / CDN wiring is a separate concern) — actual review
+// and grading of the photo is a future admin-side workflow, out of scope
+// for this model.
+model ContestPhotoSubmission {
+  id        String                @id @default(uuid())
+  userId    String
+  user      User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  contestId String
+  contest   Contest               @relation(fields: [contestId], references: [id], onDelete: Cascade)
+  imageUrl  String
+  status    PhotoSubmissionStatus @default(PENDING)
+  note      String? // reserved for the reviewer's feedback, once that workflow exists
+
+  submittedAt DateTime  @default(now())
+  reviewedAt  DateTime?
+
+  @@map("contest_photo_submissions")
 }
 
 model ContestSessionAnswer {

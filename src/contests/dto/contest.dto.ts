@@ -41,3 +41,9 @@ export class SubmitContestAnswerDto {
 export class CheckContestTextAnswerDto {
   @IsString() @IsNotEmpty() text: string;
 }
+
+// "Solve on paper, submit a photo" contest mode — see ContestPhotoSubmission.
+// Actual review/grading UI for admins is a separate future workflow.
+export class CreatePhotoSubmissionDto {
+  @IsString() @IsNotEmpty() imageBase64: string;
+}

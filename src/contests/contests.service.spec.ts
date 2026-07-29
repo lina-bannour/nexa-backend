@@ -22,6 +22,7 @@ describe('ContestsService', () => {
     };
     user: { update: jest.Mock };
     platformSettings: { findUnique: jest.Mock };
+    contestPhotoSubmission: { create: jest.Mock; findFirst: jest.Mock };
   };
 
   const question = {
@@ -64,6 +65,7 @@ describe('ContestsService', () => {
       },
       user: { update: jest.fn() },
       platformSettings: { findUnique: jest.fn().mockResolvedValue(null) },
+      contestPhotoSubmission: { create: jest.fn(), findFirst: jest.fn() },
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -414,6 +416,79 @@ describe('ContestsService', () => {
       const result = await service.getSession('session-1', 'user-1');
 
       expect(result).toBe(session);
+    });
+  });
+
+  describe('createPhotoSubmission', () => {
+    it('throws NotFoundException for an unknown contest', async () => {
+      prisma.contest.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.createPhotoSubmission('missing', 'user-1', 'YWJj'),
+      ).rejects.toThrow(NotFoundException);
+      expect(prisma.contestPhotoSubmission.create).not.toHaveBeenCalled();
+    });
+
+    it('wraps a raw base64 string into a data URL before storing', async () => {
+      prisma.contest.findUnique.mockResolvedValue({ id: 'contest-1' });
+      prisma.contestPhotoSubmission.create.mockResolvedValue({
+        id: 'sub-1',
+        status: 'PENDING',
+      });
+
+      await service.createPhotoSubmission('contest-1', 'user-1', 'YWJj');
+
+      expect(prisma.contestPhotoSubmission.create).toHaveBeenCalledWith({
+        data: {
+          contestId: 'contest-1',
+          userId: 'user-1',
+          imageUrl: 'data:image/jpeg;base64,YWJj',
+        },
+      });
+    });
+
+    it('leaves an already-prefixed data URL untouched', async () => {
+      prisma.contest.findUnique.mockResolvedValue({ id: 'contest-1' });
+      prisma.contestPhotoSubmission.create.mockResolvedValue({});
+
+      await service.createPhotoSubmission(
+        'contest-1',
+        'user-1',
+        'data:image/png;base64,ZGVm',
+      );
+
+      expect(prisma.contestPhotoSubmission.create).toHaveBeenCalledWith({
+        data: {
+          contestId: 'contest-1',
+          userId: 'user-1',
+          imageUrl: 'data:image/png;base64,ZGVm',
+        },
+      });
+    });
+  });
+
+  describe('getMyPhotoSubmission', () => {
+    it('returns the most recent submission for that user/contest', async () => {
+      prisma.contestPhotoSubmission.findFirst.mockResolvedValue({
+        id: 'sub-1',
+        status: 'PENDING',
+      });
+
+      const result = await service.getMyPhotoSubmission('contest-1', 'user-1');
+
+      expect(prisma.contestPhotoSubmission.findFirst).toHaveBeenCalledWith({
+        where: { contestId: 'contest-1', userId: 'user-1' },
+        orderBy: { submittedAt: 'desc' },
+      });
+      expect(result).toEqual({ id: 'sub-1', status: 'PENDING' });
+    });
+
+    it('returns null when the student has not submitted anything yet', async () => {
+      prisma.contestPhotoSubmission.findFirst.mockResolvedValue(null);
+
+      const result = await service.getMyPhotoSubmission('contest-1', 'user-1');
+
+      expect(result).toBeNull();
     });
   });
 });

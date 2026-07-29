@@ -9,7 +9,7 @@ import {
   Request,
 } from '@nestjs/common';
 import { ContestsService } from './contests.service';
-import { CreateContestDto, SubmitContestAnswerDto, CheckContestTextAnswerDto } from './dto/contest.dto';
+import { CreateContestDto, SubmitContestAnswerDto, CheckContestTextAnswerDto, CreatePhotoSubmissionDto } from './dto/contest.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import { Roles } from '../auth/roles.decorator';
@@ -87,5 +87,28 @@ export class ContestsController {
   @Get('sessions/:sessionId')
   getSession(@Param('sessionId') sessionId: string, @Request() req: any) {
     return this.contestsService.getSession(sessionId, req.user.userId);
+  }
+
+  // Student: "solve on paper, submit a photo" mode — alternative to the QCM.
+  // Review/grading of the photo is a separate future admin workflow.
+  @UseGuards(JwtAuthGuard)
+  @Post(':id/photo-submissions')
+  submitPhoto(
+    @Param('id') id: string,
+    @Body() dto: CreatePhotoSubmissionDto,
+    @Request() req: any,
+  ) {
+    return this.contestsService.createPhotoSubmission(
+      id,
+      req.user.userId,
+      dto.imageBase64,
+    );
+  }
+
+  // Student: check whether they already submitted a photo for this contest
+  @UseGuards(JwtAuthGuard)
+  @Get(':id/photo-submissions/me')
+  getMyPhotoSubmission(@Param('id') id: string, @Request() req: any) {
+    return this.contestsService.getMyPhotoSubmission(id, req.user.userId);
   }
 }
