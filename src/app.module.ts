@@ -8,6 +8,7 @@ import { UsersModule } from './users/users.module';
 import { ExercisesModule } from './exercises/exercises.module';
 import { ContestsModule } from './contests/contests.module';
 import { ForumModule } from './forum/forum.module';
+import { PublicSettingsModule } from './settings/public-settings.module';
 
 // Admin modules
 import { DashboardModule } from './admin/dashboard/dashboard.module';
@@ -26,6 +27,7 @@ import { MaintenanceMiddleware } from './middleware/maintenance.middleware';
     ExercisesModule,
     ContestsModule,
     ForumModule,
+    PublicSettingsModule,
     // Admin
     DashboardModule,
     AdminUsersModule,

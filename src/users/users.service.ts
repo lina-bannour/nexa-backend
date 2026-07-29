@@ -17,7 +17,7 @@ export class UsersService {
   constructor(private prisma: PrismaService) {}
 
   async getProfile(userId: string) {
-    const [user, contestsCompleted] = await Promise.all([
+    const [user, contestsCompleted, exercisesSolved] = await Promise.all([
       this.prisma.user.findUnique({
         where: { id: userId },
         select: {
@@ -39,9 +39,13 @@ export class UsersService {
       this.prisma.contestSession.count({
         where: { userId, isCompleted: true },
       }),
+      // Used for the "QCM Expert" badge (real success rate, not attempt count).
+      this.prisma.exerciseAttempt.count({
+        where: { userId, isCorrect: true },
+      }),
     ]);
     if (!user) return null;
-    return { ...user, contestsCompleted };
+    return { ...user, contestsCompleted, exercisesSolved };
   }
 
   async updateProfile(userId: string, dto: UpdateProfileDto) {

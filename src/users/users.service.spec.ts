@@ -49,12 +49,13 @@ describe('UsersService', () => {
 
   // 3.2.3 — Tests d'affichage des données du profil
   describe('getProfile', () => {
-    it('returns the profile with attempts/posts counts and contestsCompleted', async () => {
+    it('returns the profile with attempts/posts counts, contestsCompleted, and exercisesSolved', async () => {
       prisma.user.findUnique.mockResolvedValue({
         ...baseUser,
         _count: { attempts: 8, posts: 2 },
       });
       prisma.contestSession.count.mockResolvedValue(3);
+      prisma.exerciseAttempt.count.mockResolvedValue(6);
 
       const result = await service.getProfile('user-1');
 
@@ -71,11 +72,15 @@ describe('UsersService', () => {
       expect(prisma.contestSession.count).toHaveBeenCalledWith({
         where: { userId: 'user-1', isCompleted: true },
       });
+      expect(prisma.exerciseAttempt.count).toHaveBeenCalledWith({
+        where: { userId: 'user-1', isCorrect: true },
+      });
       expect(result).toEqual(
         expect.objectContaining({
           xpTotal: 120,
           filiere: 'MP',
           contestsCompleted: 3,
+          exercisesSolved: 6,
         }),
       );
     });
@@ -83,6 +88,7 @@ describe('UsersService', () => {
     it('returns null for an unknown user without querying contest sessions', async () => {
       prisma.user.findUnique.mockResolvedValue(null);
       prisma.contestSession.count.mockResolvedValue(0);
+      prisma.exerciseAttempt.count.mockResolvedValue(0);
 
       const result = await service.getProfile('missing');
 
