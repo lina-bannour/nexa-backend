@@ -1,0 +1,297 @@
+From 4db59782f510339817fc6be660277295c3d20dc2 Mon Sep 17 00:00:00 2001
+From: Claude <claude@anthropic.com>
+Date: Wed, 29 Jul 2026 06:07:23 +0000
+Subject: [PATCH] feat(contests): add 'solve on paper, submit a photo' mode
+ alongside QCM
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- New ContestPhotoSubmission model: userId, contestId, imageUrl (stored
+  as a data URL for now), status (PENDING/REVIEWED), optional reviewer
+  note — schema only, run 'npx prisma migrate dev' to generate the
+  migration
+- POST /contests/:id/photo-submissions — student uploads a photo of
+  their paper-solved contest
+- GET /contests/:id/photo-submissions/me — check submission status
+- Deliberately scoped: this only stores the submission as PENDING.
+  Reviewing/grading photos (an admin screen) is a separate piece of
+  work, not built here
+- Tests for both new service methods
+---
+ prisma/schema.prisma                  | 32 ++++++++++++
+ src/contests/contests.controller.ts   | 25 ++++++++-
+ src/contests/contests.service.spec.ts | 75 +++++++++++++++++++++++++++
+ src/contests/contests.service.ts      | 36 +++++++++++++
+ src/contests/dto/contest.dto.ts       |  6 +++
+ 5 files changed, 173 insertions(+), 1 deletion(-)
+
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index 47bcfcc..221c3c0 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -45,6 +45,15 @@ enum PostStatus {
+   REMOVED
+ }
+ 
++// Solve-on-paper-then-submit-a-photo mode for contests (alternative to the
++// interactive QCM mode). Grading/review of the photo is handled by a
++// separate admin workflow — not built here, this just gets the submission
++// stored and queryable.
++enum PhotoSubmissionStatus {
++  PENDING
++  REVIEWED
++}
++
+ model User {
+   id           String     @id @default(uuid())
+   email        String     @unique
+@@ -61,6 +70,7 @@ model User {
+ 
+   attempts        ExerciseAttempt[]
+   contestSessions ContestSession[]
++  photoSubmissions ContestPhotoSubmission[]
+   posts           ForumPost[]
+   replies         ForumReply[]
+   likes           ForumLike[]
+@@ -132,6 +142,7 @@ model Contest {
+ 
+   questions ContestQuestion[]
+   sessions  ContestSession[]
++  photoSubmissions ContestPhotoSubmission[]
+ 
+   createdAt DateTime @default(now())
+   updatedAt DateTime @updatedAt
+@@ -188,6 +199,27 @@ model ContestSession {
+   @@map("contest_sessions")
+ }
+ 
++// A student solving the whole contest on paper and submitting a photo of
++// their work, instead of the interactive QCM mode. Storage here is a plain
++// URL (upload target / CDN wiring is a separate concern) — actual review
++// and grading of the photo is a future admin-side workflow, out of scope
++// for this model.
++model ContestPhotoSubmission {
++  id        String                @id @default(uuid())
++  userId    String
++  user      User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
++  contestId String
++  contest   Contest               @relation(fields: [contestId], references: [id], onDelete: Cascade)
++  imageUrl  String
++  status    PhotoSubmissionStatus @default(PENDING)
++  note      String? // reserved for the reviewer's feedback, once that workflow exists
++
++  submittedAt DateTime  @default(now())
++  reviewedAt  DateTime?
++
++  @@map("contest_photo_submissions")
++}
++
+ model ContestSessionAnswer {
+   id               String          @id @default(uuid())
+   sessionId        String
+diff --git a/src/contests/contests.controller.ts b/src/contests/contests.controller.ts
+index d172471..8037eed 100644
+--- a/src/contests/contests.controller.ts
++++ b/src/contests/contests.controller.ts
+@@ -9,7 +9,7 @@ import {
+   Request,
+ } from '@nestjs/common';
+ import { ContestsService } from './contests.service';
+-import { CreateContestDto, SubmitContestAnswerDto, CheckContestTextAnswerDto } from './dto/contest.dto';
++import { CreateContestDto, SubmitContestAnswerDto, CheckContestTextAnswerDto, CreatePhotoSubmissionDto } from './dto/contest.dto';
+ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+ import { RolesGuard } from '../auth/roles.guard';
+ import { Roles } from '../auth/roles.decorator';
+@@ -88,4 +88,27 @@ export class ContestsController {
+   getSession(@Param('sessionId') sessionId: string, @Request() req: any) {
+     return this.contestsService.getSession(sessionId, req.user.userId);
+   }
++
++  // Student: "solve on paper, submit a photo" mode — alternative to the QCM.
++  // Review/grading of the photo is a separate future admin workflow.
++  @UseGuards(JwtAuthGuard)
++  @Post(':id/photo-submissions')
++  submitPhoto(
++    @Param('id') id: string,
++    @Body() dto: CreatePhotoSubmissionDto,
++    @Request() req: any,
++  ) {
++    return this.contestsService.createPhotoSubmission(
++      id,
++      req.user.userId,
++      dto.imageBase64,
++    );
++  }
++
++  // Student: check whether they already submitted a photo for this contest
++  @UseGuards(JwtAuthGuard)
++  @Get(':id/photo-submissions/me')
++  getMyPhotoSubmission(@Param('id') id: string, @Request() req: any) {
++    return this.contestsService.getMyPhotoSubmission(id, req.user.userId);
++  }
+ }
+diff --git a/src/contests/contests.service.spec.ts b/src/contests/contests.service.spec.ts
+index 5cbeaaf..056a555 100644
+--- a/src/contests/contests.service.spec.ts
++++ b/src/contests/contests.service.spec.ts
+@@ -22,6 +22,7 @@ describe('ContestsService', () => {
+     };
+     user: { update: jest.Mock };
+     platformSettings: { findUnique: jest.Mock };
++    contestPhotoSubmission: { create: jest.Mock; findFirst: jest.Mock };
+   };
+ 
+   const question = {
+@@ -64,6 +65,7 @@ describe('ContestsService', () => {
+       },
+       user: { update: jest.fn() },
+       platformSettings: { findUnique: jest.fn().mockResolvedValue(null) },
++      contestPhotoSubmission: { create: jest.fn(), findFirst: jest.fn() },
+     };
+ 
+     const module: TestingModule = await Test.createTestingModule({
+@@ -416,4 +418,77 @@ describe('ContestsService', () => {
+       expect(result).toBe(session);
+     });
+   });
++
++  describe('createPhotoSubmission', () => {
++    it('throws NotFoundException for an unknown contest', async () => {
++      prisma.contest.findUnique.mockResolvedValue(null);
++
++      await expect(
++        service.createPhotoSubmission('missing', 'user-1', 'YWJj'),
++      ).rejects.toThrow(NotFoundException);
++      expect(prisma.contestPhotoSubmission.create).not.toHaveBeenCalled();
++    });
++
++    it('wraps a raw base64 string into a data URL before storing', async () => {
++      prisma.contest.findUnique.mockResolvedValue({ id: 'contest-1' });
++      prisma.contestPhotoSubmission.create.mockResolvedValue({
++        id: 'sub-1',
++        status: 'PENDING',
++      });
++
++      await service.createPhotoSubmission('contest-1', 'user-1', 'YWJj');
++
++      expect(prisma.contestPhotoSubmission.create).toHaveBeenCalledWith({
++        data: {
++          contestId: 'contest-1',
++          userId: 'user-1',
++          imageUrl: 'data:image/jpeg;base64,YWJj',
++        },
++      });
++    });
++
++    it('leaves an already-prefixed data URL untouched', async () => {
++      prisma.contest.findUnique.mockResolvedValue({ id: 'contest-1' });
++      prisma.contestPhotoSubmission.create.mockResolvedValue({});
++
++      await service.createPhotoSubmission(
++        'contest-1',
++        'user-1',
++        'data:image/png;base64,ZGVm',
++      );
++
++      expect(prisma.contestPhotoSubmission.create).toHaveBeenCalledWith({
++        data: {
++          contestId: 'contest-1',
++          userId: 'user-1',
++          imageUrl: 'data:image/png;base64,ZGVm',
++        },
++      });
++    });
++  });
++
++  describe('getMyPhotoSubmission', () => {
++    it('returns the most recent submission for that user/contest', async () => {
++      prisma.contestPhotoSubmission.findFirst.mockResolvedValue({
++        id: 'sub-1',
++        status: 'PENDING',
++      });
++
++      const result = await service.getMyPhotoSubmission('contest-1', 'user-1');
++
++      expect(prisma.contestPhotoSubmission.findFirst).toHaveBeenCalledWith({
++        where: { contestId: 'contest-1', userId: 'user-1' },
++        orderBy: { submittedAt: 'desc' },
++      });
++      expect(result).toEqual({ id: 'sub-1', status: 'PENDING' });
++    });
++
++    it('returns null when the student has not submitted anything yet', async () => {
++      prisma.contestPhotoSubmission.findFirst.mockResolvedValue(null);
++
++      const result = await service.getMyPhotoSubmission('contest-1', 'user-1');
++
++      expect(result).toBeNull();
++    });
++  });
+ });
+diff --git a/src/contests/contests.service.ts b/src/contests/contests.service.ts
+index e7b58a9..4417f48 100644
+--- a/src/contests/contests.service.ts
++++ b/src/contests/contests.service.ts
+@@ -293,6 +293,42 @@ export class ContestsService {
+     return session;
+   }
+ 
++  // ─── "Solve on paper, submit a photo" mode (alternative to the QCM) ──────
++  // The student solves the whole contest offline, then uploads a photo of
++  // their work here. This just stores the submission as PENDING — the
++  // actual review/grading workflow (an admin screen to look at the photo
++  // and mark it reviewed, with a score/note) is a separate piece of work,
++  // not built here.
++
++  async createPhotoSubmission(
++    contestId: string,
++    userId: string,
++    imageBase64: string,
++  ) {
++    const contest = await this.prisma.contest.findUnique({
++      where: { id: contestId },
++    });
++    if (!contest) throw new NotFoundException('Contest not found');
++
++    // Stored inline as a data URL for now — swapping this for a real
++    // object-storage upload (S3 / Cloud Storage) and storing just the
++    // resulting URL is a natural next step, but out of scope here.
++    const imageUrl = imageBase64.startsWith('data:')
++      ? imageBase64
++      : `data:image/jpeg;base64,${imageBase64}`;
++
++    return this.prisma.contestPhotoSubmission.create({
++      data: { contestId, userId, imageUrl },
++    });
++  }
++
++  async getMyPhotoSubmission(contestId: string, userId: string) {
++    return this.prisma.contestPhotoSubmission.findFirst({
++      where: { contestId, userId },
++      orderBy: { submittedAt: 'desc' },
++    });
++  }
++
+   // Reads the admin-configured hint penalties (feature 12.2). Falls back to
+   // the previous hardcoded defaults if settings haven't been configured yet,
+   // or if the settings row can't be reached.
+diff --git a/src/contests/dto/contest.dto.ts b/src/contests/dto/contest.dto.ts
+index 34d66be..813bdff 100644
+--- a/src/contests/dto/contest.dto.ts
++++ b/src/contests/dto/contest.dto.ts
+@@ -40,4 +40,10 @@ export class SubmitContestAnswerDto {
+ 
+ export class CheckContestTextAnswerDto {
+   @IsString() @IsNotEmpty() text: string;
++}
++
++// "Solve on paper, submit a photo" contest mode — see ContestPhotoSubmission.
++// Actual review/grading UI for admins is a separate future workflow.
++export class CreatePhotoSubmissionDto {
++  @IsString() @IsNotEmpty() imageBase64: string;
+ }
+\ No newline at end of file
+-- 
+2.43.0
+
