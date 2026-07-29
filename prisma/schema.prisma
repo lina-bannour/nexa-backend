@@ -54,6 +54,22 @@ enum PhotoSubmissionStatus {
   REVIEWED
 }
 
+// One row per (user, mission, calendar day) once a daily mission's bonus XP
+// has been granted — the unique constraint is what makes awarding
+// idempotent (see UsersService.getDailyMissions).
+model DailyMissionClaim {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  missionKey String
+  day        DateTime @db.Date
+  xpAwarded  Int
+  claimedAt  DateTime @default(now())
+
+  @@unique([userId, missionKey, day])
+  @@map("daily_mission_claims")
+}
+
 model User {
   id           String     @id @default(uuid())
   email        String     @unique
@@ -71,6 +87,7 @@ model User {
   attempts        ExerciseAttempt[]
   contestSessions ContestSession[]
   photoSubmissions ContestPhotoSubmission[]
+  dailyMissionClaims DailyMissionClaim[]
   posts           ForumPost[]
   replies         ForumReply[]
   likes           ForumLike[]

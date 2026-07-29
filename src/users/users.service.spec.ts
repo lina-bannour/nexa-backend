@@ -7,6 +7,9 @@ describe('UsersService', () => {
   let prisma: {
     user: { findUnique: jest.Mock; update: jest.Mock; findMany: jest.Mock };
     contestSession: { count: jest.Mock };
+    exerciseAttempt: { count: jest.Mock };
+    forumPost: { count: jest.Mock };
+    dailyMissionClaim: { findMany: jest.Mock; create: jest.Mock };
     $queryRaw: jest.Mock;
   };
 
@@ -27,6 +30,9 @@ describe('UsersService', () => {
     prisma = {
       user: { findUnique: jest.fn(), update: jest.fn(), findMany: jest.fn() },
       contestSession: { count: jest.fn() },
+      exerciseAttempt: { count: jest.fn() },
+      forumPost: { count: jest.fn() },
+      dailyMissionClaim: { findMany: jest.fn(), create: jest.fn() },
       $queryRaw: jest.fn(),
     };
 
@@ -253,6 +259,81 @@ describe('UsersService', () => {
         data: {},
         select: expect.any(Object),
       });
+    });
+  });
+
+  describe('getDailyMissions', () => {
+    it('reports progress without awarding anything below threshold', async () => {
+      prisma.exerciseAttempt.count.mockResolvedValue(1); // needs 3
+      prisma.forumPost.count.mockResolvedValue(0);
+      prisma.contestSession.count.mockResolvedValue(0);
+      prisma.dailyMissionClaim.findMany.mockResolvedValue([]);
+
+      const result = await service.getDailyMissions('user-1');
+
+      expect(result.missions).toEqual([
+        { key: 'EXERCISES', label: '3 exercices complétés', xp: 30, threshold: 3, progress: 1, completed: false },
+        { key: 'FORUM', label: 'Publier sur le forum', xp: 15, threshold: 1, progress: 0, completed: false },
+        { key: 'CONTEST', label: 'Compléter un concours', xp: 50, threshold: 1, progress: 0, completed: false },
+      ]);
+      expect(prisma.dailyMissionClaim.create).not.toHaveBeenCalled();
+      expect(prisma.user.update).not.toHaveBeenCalled();
+    });
+
+    it('awards the bonus XP the first time a mission newly qualifies today', async () => {
+      prisma.exerciseAttempt.count.mockResolvedValue(3); // meets threshold
+      prisma.forumPost.count.mockResolvedValue(0);
+      prisma.contestSession.count.mockResolvedValue(0);
+      prisma.dailyMissionClaim.findMany.mockResolvedValue([]);
+      prisma.dailyMissionClaim.create.mockResolvedValue({});
+      prisma.user.update.mockResolvedValue({});
+
+      const result = await service.getDailyMissions('user-1');
+
+      expect(prisma.dailyMissionClaim.create).toHaveBeenCalledTimes(1);
+      expect(prisma.dailyMissionClaim.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          userId: 'user-1',
+          missionKey: 'EXERCISES',
+          xpAwarded: 30,
+        }),
+      });
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'user-1' },
+        data: { xpTotal: { increment: 30 } },
+      });
+      expect(result.missions.find((m) => m.key === 'EXERCISES')?.completed).toBe(true);
+    });
+
+    it('does not re-award a mission already claimed today', async () => {
+      prisma.exerciseAttempt.count.mockResolvedValue(5); // still qualifies
+      prisma.forumPost.count.mockResolvedValue(1);
+      prisma.contestSession.count.mockResolvedValue(0);
+      prisma.dailyMissionClaim.findMany.mockResolvedValue([
+        { missionKey: 'EXERCISES' },
+        { missionKey: 'FORUM' },
+      ]);
+
+      const result = await service.getDailyMissions('user-1');
+
+      expect(prisma.dailyMissionClaim.create).not.toHaveBeenCalled();
+      expect(prisma.user.update).not.toHaveBeenCalled();
+      expect(result.missions.find((m) => m.key === 'EXERCISES')?.completed).toBe(true);
+      expect(result.missions.find((m) => m.key === 'FORUM')?.completed).toBe(true);
+      expect(result.missions.find((m) => m.key === 'CONTEST')?.completed).toBe(false);
+    });
+
+    it('swallows a unique-constraint race without crashing or double-crediting XP', async () => {
+      prisma.exerciseAttempt.count.mockResolvedValue(3);
+      prisma.forumPost.count.mockResolvedValue(0);
+      prisma.contestSession.count.mockResolvedValue(0);
+      prisma.dailyMissionClaim.findMany.mockResolvedValue([]);
+      prisma.dailyMissionClaim.create.mockRejectedValue(new Error('Unique constraint failed'));
+
+      const result = await service.getDailyMissions('user-1');
+
+      expect(prisma.user.update).not.toHaveBeenCalled();
+      expect(result.missions.find((m) => m.key === 'EXERCISES')?.completed).toBe(false);
     });
   });
 });

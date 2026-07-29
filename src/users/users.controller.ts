@@ -27,6 +27,14 @@ export class UsersController {
     return this.usersService.updateProfile(req.user.userId, dto);
   }
 
+  // "Missions du jour" on the profile screen — distinct from the lifetime
+  // Progression checklist. Resets daily, grants a one-time bonus XP.
+  @UseGuards(JwtAuthGuard)
+  @Get('me/daily-missions')
+  getDailyMissions(@Request() req: any) {
+    return this.usersService.getDailyMissions(req.user.userId);
+  }
+
   // GET /users/leaderboard?filiere=MP&period=semaine|mois|global
   @UseGuards(JwtAuthGuard)
   @Get('leaderboard')

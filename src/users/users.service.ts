@@ -157,4 +157,95 @@ export class UsersService {
       filiere: filiere ?? null,
     };
   }
+
+  // ─── "Missions du jour" (daily missions) ──────────────────────────────
+  // Distinct from the lifetime "Progression" checklist above: these reset
+  // every calendar day and grant a one-time bonus XP the first time each
+  // is completed that day. Awarding happens here, lazily, whenever this
+  // is called (e.g. on profile load) rather than being hooked into every
+  // action — the unique (userId, missionKey, day) constraint on
+  // DailyMissionClaim makes this idempotent even if called concurrently.
+  //
+  // "Utiliser l'IA NEXA" is intentionally left out of MISSIONS below: that
+  // feature doesn't exist on the backend yet (see the profile Progression
+  // checklist, where it's shown as "Bientôt" for the same reason), so it
+  // can never actually be completed or awarded.
+  private static readonly DAILY_MISSIONS = [
+    { key: 'EXERCISES', label: '3 exercices complétés', xp: 30, threshold: 3 },
+    { key: 'FORUM', label: 'Publier sur le forum', xp: 15, threshold: 1 },
+    { key: 'CONTEST', label: 'Compléter un concours', xp: 50, threshold: 1 },
+  ];
+
+  async getDailyMissions(userId: string) {
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const tomorrow = new Date(today.getTime() + 24 * 60 * 60 * 1000);
+
+    const [exercisesToday, forumPostsToday, contestsToday, claims] =
+      await Promise.all([
+        this.prisma.exerciseAttempt.count({
+          where: {
+            userId,
+            isCorrect: true,
+            createdAt: { gte: today, lt: tomorrow },
+          },
+        }),
+        this.prisma.forumPost.count({
+          where: { authorId: userId, createdAt: { gte: today, lt: tomorrow } },
+        }),
+        this.prisma.contestSession.count({
+          where: {
+            userId,
+            isCompleted: true,
+            completedAt: { gte: today, lt: tomorrow },
+          },
+        }),
+        this.prisma.dailyMissionClaim.findMany({
+          where: { userId, day: today },
+        }),
+      ]);
+
+    const progressByKey: Record<string, number> = {
+      EXERCISES: exercisesToday,
+      FORUM: forumPostsToday,
+      CONTEST: contestsToday,
+    };
+    const claimedKeys = new Set(claims.map((c) => c.missionKey));
+
+    for (const mission of UsersService.DAILY_MISSIONS) {
+      const alreadyClaimed = claimedKeys.has(mission.key);
+      const nowQualifies = progressByKey[mission.key] >= mission.threshold;
+      if (alreadyClaimed || !nowQualifies) continue;
+
+      try {
+        await this.prisma.dailyMissionClaim.create({
+          data: {
+            userId,
+            missionKey: mission.key,
+            day: today,
+            xpAwarded: mission.xp,
+          },
+        });
+        await this.prisma.user.update({
+          where: { id: userId },
+          data: { xpTotal: { increment: mission.xp } },
+        });
+        claimedKeys.add(mission.key);
+      } catch {
+        // Unique constraint hit — a concurrent request already claimed
+        // this mission for today. Nothing to do.
+      }
+    }
+
+    return {
+      missions: UsersService.DAILY_MISSIONS.map((mission) => ({
+        key: mission.key,
+        label: mission.label,
+        xp: mission.xp,
+        threshold: mission.threshold,
+        progress: progressByKey[mission.key] ?? 0,
+        completed: claimedKeys.has(mission.key),
+      })),
+    };
+  }
 }
