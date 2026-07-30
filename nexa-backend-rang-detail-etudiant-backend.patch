@@ -1,0 +1,417 @@
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -95,6 +95,8 @@
+   likes           ForumLike[]
+   resetTokens        PasswordResetToken[]
+   verificationTokens EmailVerificationToken[]
++  messagesReceived AdminMessage[] @relation("MessageRecipient")
++  messagesSent     AdminMessage[] @relation("MessageSender")
+ 
+   createdAt DateTime @default(now())
+   updatedAt DateTime @updatedAt
+@@ -102,6 +104,24 @@
+   @@map("users")
+ }
+ 
++// A one-off message sent by an admin to a student from the "Détail
++// étudiant" panel (Envoyer message). Simple persisted inbox entry — no
++// threading/replies, that's out of scope for this feature.
++model AdminMessage {
++  id      String @id @default(uuid())
++  userId  String
++  user    User   @relation("MessageRecipient", fields: [userId], references: [id], onDelete: Cascade)
++  adminId String
++  admin   User   @relation("MessageSender", fields: [adminId], references: [id], onDelete: Cascade)
++  subject String
++  message String    @db.Text
++  readAt  DateTime?
++
++  createdAt DateTime @default(now())
++
++  @@map("admin_messages")
++}
++
+ model Exercise {
+   id                String     @id @default(uuid())
+   titre             String
+--- a/src/admin/users/dto/admin-user.dto.ts
++++ b/src/admin/users/dto/admin-user.dto.ts
+@@ -1,4 +1,4 @@
+-import { IsIn, IsOptional, IsString } from 'class-validator';
++import { IsIn, IsNotEmpty, IsOptional, IsString } from 'class-validator';
+ 
+ export class UpdateUserDto {
+   @IsOptional()
+@@ -27,3 +27,13 @@
+   @IsIn(['STUDENT', 'ADMIN'])
+   role: string;
+ }
++
++export class SendMessageDto {
++  @IsString()
++  @IsNotEmpty()
++  subject: string;
++
++  @IsString()
++  @IsNotEmpty()
++  message: string;
++}
+--- a/src/admin/users/admin-users.controller.ts
++++ b/src/admin/users/admin-users.controller.ts
+@@ -3,6 +3,7 @@
+   Get,
+   Put,
+   Patch,
++  Post,
+   Param,
+   Body,
+   Query,
+@@ -14,6 +15,7 @@
+   UpdateUserDto,
+   UpdateUserStatusDto,
+   UpdateUserRoleDto,
++  SendMessageDto,
+ } from './dto/admin-user.dto';
+ import { JwtAuthGuard } from '../../auth/jwt-auth.guard';
+ import { RolesGuard } from '../../auth/roles.guard';
+@@ -67,4 +69,13 @@
+   ) {
+     return this.adminUsersService.updateRole(id, req.user.userId, dto);
+   }
++
++  @Post(':id/message')
++  sendMessage(
++    @Param('id') id: string,
++    @Body() dto: SendMessageDto,
++    @Request() req: any,
++  ) {
++    return this.adminUsersService.sendMessage(id, req.user.userId, dto);
++  }
+ }
+--- a/src/admin/users/admin-users.service.ts
++++ b/src/admin/users/admin-users.service.ts
+@@ -4,11 +4,13 @@
+   BadRequestException,
+   ForbiddenException,
+ } from '@nestjs/common';
++import { Prisma } from '@prisma/client';
+ import { PrismaService } from '../../prisma/prisma.service';
+ import {
+   UpdateUserDto,
+   UpdateUserStatusDto,
+   UpdateUserRoleDto,
++  SendMessageDto,
+ } from './dto/admin-user.dto';
+ 
+ @Injectable()
+@@ -88,9 +90,14 @@
+     });
+     if (!user) throw new NotFoundException('User not found');
+ 
+-    const exercisesSolved = await this.prisma.exerciseAttempt.count({
+-      where: { userId: id, isCorrect: true },
+-    });
++    const [exercisesSolved, lastActivityAt, xpProgression] =
++      await Promise.all([
++        this.prisma.exerciseAttempt.count({
++          where: { userId: id, isCorrect: true },
++        }),
++        this.getLastActivityAt(id),
++        this.getXpProgression(id),
++      ]);
+ 
+     // eslint-disable-next-line @typescript-eslint/no-unused-vars
+     const { passwordHash, ...safe } = user;
+@@ -98,9 +105,82 @@
+       ...safe,
+       exercisesAttempted: user._count.attempts,
+       exercisesSolved,
++      lastActivityAt,
++      xpProgression,
+     };
+   }
+ 
++  // Most recent timestamp across the (dated) activity sources we track:
++  // exercise attempts, contest QCM answers, forum posts. No dedicated
++  // "last seen" column on User — computed on demand since this is only
++  // read one user at a time, from the admin detail panel.
++  private async getLastActivityAt(userId: string): Promise<Date | null> {
++    const [lastAttempt, lastContestAnswer, lastPost] = await Promise.all([
++      this.prisma.exerciseAttempt.findFirst({
++        where: { userId },
++        orderBy: { createdAt: 'desc' },
++        select: { createdAt: true },
++      }),
++      this.prisma.contestSessionAnswer.findFirst({
++        where: { session: { userId } },
++        orderBy: { answeredAt: 'desc' },
++        select: { answeredAt: true },
++      }),
++      this.prisma.forumPost.findFirst({
++        where: { authorId: userId },
++        orderBy: { createdAt: 'desc' },
++        select: { createdAt: true },
++      }),
++    ]);
++
++    const dates = [
++      lastAttempt?.createdAt,
++      lastContestAnswer?.answeredAt,
++      lastPost?.createdAt,
++    ].filter((d): d is Date => d != null);
++
++    if (dates.length === 0) return null;
++    return new Date(Math.max(...dates.map((d) => d.getTime())));
++  }
++
++  // Cumulative XP by month for the last 12 months, for the "Progression
++  // XP" chart. Only sources with a timestamp are included (exercise
++  // attempts + contest QCM answers) — forum/daily-mission bonus XP is
++  // added straight to xpTotal with no dated ledger (same limitation noted
++  // on the leaderboard's weekly/monthly view), so this slightly undercounts
++  // versus the student's live xpTotal shown elsewhere on the panel.
++  private async getXpProgression(
++    userId: string,
++  ): Promise<Array<{ month: string; xp: number }>> {
++    const rows = await this.prisma.$queryRaw<
++      Array<{ month: string; xp: bigint | number }>
++    >(Prisma.sql`
++      WITH months AS (
++        SELECT date_trunc('month', now()) - (n || ' months')::interval AS month_start
++        FROM generate_series(11, 0, -1) AS n
++      ),
++      dated_xp AS (
++        SELECT "createdAt" AS ts, "xpEarned" AS xp
++        FROM exercise_attempts WHERE "userId" = ${userId}
++        UNION ALL
++        SELECT csa."answeredAt" AS ts, csa."xpEarned" AS xp
++        FROM contest_session_answers csa
++        JOIN contest_sessions cs ON cs.id = csa."sessionId"
++        WHERE cs."userId" = ${userId}
++      )
++      SELECT
++        to_char(m.month_start, 'YYYY-MM') AS month,
++        COALESCE(
++          (SELECT SUM(xp) FROM dated_xp WHERE ts < m.month_start + interval '1 month'),
++          0
++        ) AS xp
++      FROM months m
++      ORDER BY m.month_start ASC
++    `);
++
++    return rows.map((r) => ({ month: r.month, xp: Number(r.xp) }));
++  }
++
+   // 9.3.1 — Update user info
+   async update(id: string, dto: UpdateUserDto) {
+     const user = await this.prisma.user.findUnique({ where: { id } });
+@@ -159,4 +239,20 @@
+       select: { id: true, nom: true, prenom: true, email: true, role: true },
+     });
+   }
++
++  // 9.3.4 — Send a one-off message from an admin to a student (persisted,
++  // no reply/thread UI — that's separate future work if it's ever needed).
++  async sendMessage(id: string, adminId: string, dto: SendMessageDto) {
++    const user = await this.prisma.user.findUnique({ where: { id } });
++    if (!user) throw new NotFoundException('User not found');
++    return this.prisma.adminMessage.create({
++      data: {
++        userId: id,
++        adminId,
++        subject: dto.subject,
++        message: dto.message,
++      },
++      select: { id: true, subject: true, message: true, createdAt: true },
++    });
++  }
+ }
+--- a/src/admin/users/admin-users.service.spec.ts
++++ b/src/admin/users/admin-users.service.spec.ts
+@@ -16,7 +16,11 @@
+       update: jest.Mock;
+       count: jest.Mock;
+     };
+-    exerciseAttempt: { count: jest.Mock };
++    exerciseAttempt: { count: jest.Mock; findFirst: jest.Mock };
++    contestSessionAnswer: { findFirst: jest.Mock };
++    forumPost: { findFirst: jest.Mock };
++    adminMessage: { create: jest.Mock };
++    $queryRaw: jest.Mock;
+   };
+ 
+   const student = {
+@@ -38,7 +42,11 @@
+         update: jest.fn(),
+         count: jest.fn(),
+       },
+-      exerciseAttempt: { count: jest.fn() },
++      exerciseAttempt: { count: jest.fn(), findFirst: jest.fn() },
++      contestSessionAnswer: { findFirst: jest.fn() },
++      forumPost: { findFirst: jest.fn() },
++      adminMessage: { create: jest.fn() },
++      $queryRaw: jest.fn(),
+     };
+ 
+     const module: TestingModule = await Test.createTestingModule({
+@@ -124,6 +132,10 @@
+         _count: { attempts: 12, contestSessions: 2, posts: 3 },
+       });
+       prisma.exerciseAttempt.count.mockResolvedValue(7);
++      prisma.exerciseAttempt.findFirst.mockResolvedValue(null);
++      prisma.contestSessionAnswer.findFirst.mockResolvedValue(null);
++      prisma.forumPost.findFirst.mockResolvedValue(null);
++      prisma.$queryRaw.mockResolvedValue([]);
+ 
+       const result = await service.findOne('user-1');
+ 
+@@ -134,6 +146,88 @@
+       expect(result.exercisesAttempted).toBe(12);
+       expect(result.exercisesSolved).toBe(7);
+     });
++
++    it('returns null lastActivityAt when the student has no dated activity', async () => {
++      prisma.user.findUnique.mockResolvedValue({
++        ...student,
++        passwordHash: 'hashed',
++        _count: { attempts: 0, contestSessions: 0, posts: 0 },
++      });
++      prisma.exerciseAttempt.count.mockResolvedValue(0);
++      prisma.exerciseAttempt.findFirst.mockResolvedValue(null);
++      prisma.contestSessionAnswer.findFirst.mockResolvedValue(null);
++      prisma.forumPost.findFirst.mockResolvedValue(null);
++      prisma.$queryRaw.mockResolvedValue([]);
++
++      const result = await service.findOne('user-1');
++
++      expect(result.lastActivityAt).toBeNull();
++      expect(result.xpProgression).toEqual([]);
++    });
++
++    it('picks the most recent timestamp across exercises/contests/forum for lastActivityAt', async () => {
++      prisma.user.findUnique.mockResolvedValue({
++        ...student,
++        passwordHash: 'hashed',
++        _count: { attempts: 1, contestSessions: 1, posts: 1 },
++      });
++      prisma.exerciseAttempt.count.mockResolvedValue(1);
++      prisma.exerciseAttempt.findFirst.mockResolvedValue({
++        createdAt: new Date('2026-07-01T00:00:00Z'),
++      });
++      prisma.contestSessionAnswer.findFirst.mockResolvedValue({
++        answeredAt: new Date('2026-07-29T12:00:00Z'), // most recent
++      });
++      prisma.forumPost.findFirst.mockResolvedValue({
++        createdAt: new Date('2026-06-15T00:00:00Z'),
++      });
++      prisma.$queryRaw.mockResolvedValue([]);
++
++      const result = await service.findOne('user-1');
++
++      expect(result.lastActivityAt).toEqual(
++        new Date('2026-07-29T12:00:00Z'),
++      );
++    });
++  });
++
++  describe('sendMessage', () => {
++    it('throws NotFoundException for an unknown user', async () => {
++      prisma.user.findUnique.mockResolvedValue(null);
++      await expect(
++        service.sendMessage('missing', 'admin-1', {
++          subject: 'Salut',
++          message: 'Continue comme ça !',
++        }),
++      ).rejects.toThrow(NotFoundException);
++    });
++
++    it('persists the message from the admin to the student', async () => {
++      prisma.user.findUnique.mockResolvedValue(student);
++      prisma.adminMessage.create.mockResolvedValue({
++        id: 'msg-1',
++        subject: 'Salut',
++        message: 'Continue comme ça !',
++        createdAt: new Date('2026-07-30T00:00:00Z'),
++      });
++
++      const result = await service.sendMessage('user-1', 'admin-1', {
++        subject: 'Salut',
++        message: 'Continue comme ça !',
++      });
++
++      expect(prisma.adminMessage.create).toHaveBeenCalledWith(
++        expect.objectContaining({
++          data: {
++            userId: 'user-1',
++            adminId: 'admin-1',
++            subject: 'Salut',
++            message: 'Continue comme ça !',
++          },
++        }),
++      );
++      expect(result.id).toBe('msg-1');
++    });
+   });
+ 
+   describe('updateStatus', () => {
+--- a/src/admin/users/admin-users.controller.spec.ts
++++ b/src/admin/users/admin-users.controller.spec.ts
+@@ -10,6 +10,7 @@
+     update: jest.Mock;
+     updateStatus: jest.Mock;
+     updateRole: jest.Mock;
++    sendMessage: jest.Mock;
+   };
+ 
+   const req = { user: { userId: 'admin-1', role: 'ADMIN' } };
+@@ -21,6 +22,7 @@
+       update: jest.fn(),
+       updateStatus: jest.fn(),
+       updateRole: jest.fn(),
++      sendMessage: jest.fn(),
+     };
+ 
+     const module: TestingModule = await Test.createTestingModule({
+@@ -120,4 +122,21 @@
+       status: 'BANNED',
+     });
+   });
++
++  it('sendMessage passes the sending admin id to the service', async () => {
++    service.sendMessage.mockResolvedValue({ id: 'msg-1' });
++
++    const result = await controller.sendMessage(
++      'user-1',
++      { subject: 'Salut', message: 'Continue comme ça !' },
++      req,
++    );
++
++    expect(service.sendMessage).toHaveBeenCalledWith(
++      'user-1',
++      'admin-1',
++      { subject: 'Salut', message: 'Continue comme ça !' },
++    );
++    expect(result).toEqual({ id: 'msg-1' });
++  });
+ });
+--- a/prisma/migrations/20260730130000_add_admin_messages/migration.sql
++++ b/prisma/migrations/20260730130000_add_admin_messages/migration.sql
+@@ -0,0 +1,18 @@
++-- CreateTable
++CREATE TABLE "admin_messages" (
++    "id" TEXT NOT NULL,
++    "userId" TEXT NOT NULL,
++    "adminId" TEXT NOT NULL,
++    "subject" TEXT NOT NULL,
++    "message" TEXT NOT NULL,
++    "readAt" TIMESTAMP(3),
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++
++    CONSTRAINT "admin_messages_pkey" PRIMARY KEY ("id")
++);
++
++-- AddForeignKey
++ALTER TABLE "admin_messages" ADD CONSTRAINT "admin_messages_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "admin_messages" ADD CONSTRAINT "admin_messages_adminId_fkey" FOREIGN KEY ("adminId") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;

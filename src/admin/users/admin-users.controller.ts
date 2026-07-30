@@ -3,6 +3,7 @@ import {
   Get,
   Put,
   Patch,
+  Post,
   Param,
   Body,
   Query,
@@ -14,6 +15,7 @@ import {
   UpdateUserDto,
   UpdateUserStatusDto,
   UpdateUserRoleDto,
+  SendMessageDto,
 } from './dto/admin-user.dto';
 import { JwtAuthGuard } from '../../auth/jwt-auth.guard';
 import { RolesGuard } from '../../auth/roles.guard';
@@ -66,5 +68,14 @@ export class AdminUsersController {
     @Request() req: any,
   ) {
     return this.adminUsersService.updateRole(id, req.user.userId, dto);
+  }
+
+  @Post(':id/message')
+  sendMessage(
+    @Param('id') id: string,
+    @Body() dto: SendMessageDto,
+    @Request() req: any,
+  ) {
+    return this.adminUsersService.sendMessage(id, req.user.userId, dto);
   }
 }

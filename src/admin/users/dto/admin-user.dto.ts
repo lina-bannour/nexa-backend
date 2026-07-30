@@ -1,4 +1,4 @@
-import { IsIn, IsOptional, IsString } from 'class-validator';
+import { IsIn, IsNotEmpty, IsOptional, IsString } from 'class-validator';
 
 export class UpdateUserDto {
   @IsOptional()
@@ -26,4 +26,14 @@ export class UpdateUserStatusDto {
 export class UpdateUserRoleDto {
   @IsIn(['STUDENT', 'ADMIN'])
   role: string;
+}
+
+export class SendMessageDto {
+  @IsString()
+  @IsNotEmpty()
+  subject: string;
+
+  @IsString()
+  @IsNotEmpty()
+  message: string;
 }

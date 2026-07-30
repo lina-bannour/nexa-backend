@@ -10,6 +10,7 @@ describe('AdminUsersController', () => {
     update: jest.Mock;
     updateStatus: jest.Mock;
     updateRole: jest.Mock;
+    sendMessage: jest.Mock;
   };
 
   const req = { user: { userId: 'admin-1', role: 'ADMIN' } };
@@ -21,6 +22,7 @@ describe('AdminUsersController', () => {
       update: jest.fn(),
       updateStatus: jest.fn(),
       updateRole: jest.fn(),
+      sendMessage: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -119,5 +121,22 @@ describe('AdminUsersController', () => {
     expect(service.updateStatus).toHaveBeenCalledWith('user-1', {
       status: 'BANNED',
     });
+  });
+
+  it('sendMessage passes the sending admin id to the service', async () => {
+    service.sendMessage.mockResolvedValue({ id: 'msg-1' });
+
+    const result = await controller.sendMessage(
+      'user-1',
+      { subject: 'Salut', message: 'Continue comme ça !' },
+      req,
+    );
+
+    expect(service.sendMessage).toHaveBeenCalledWith(
+      'user-1',
+      'admin-1',
+      { subject: 'Salut', message: 'Continue comme ça !' },
+    );
+    expect(result).toEqual({ id: 'msg-1' });
   });
 });

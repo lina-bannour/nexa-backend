@@ -16,7 +16,11 @@ describe('AdminUsersService', () => {
       update: jest.Mock;
       count: jest.Mock;
     };
-    exerciseAttempt: { count: jest.Mock };
+    exerciseAttempt: { count: jest.Mock; findFirst: jest.Mock };
+    contestSessionAnswer: { findFirst: jest.Mock };
+    forumPost: { findFirst: jest.Mock };
+    adminMessage: { create: jest.Mock };
+    $queryRaw: jest.Mock;
   };
 
   const student = {
@@ -38,7 +42,11 @@ describe('AdminUsersService', () => {
         update: jest.fn(),
         count: jest.fn(),
       },
-      exerciseAttempt: { count: jest.fn() },
+      exerciseAttempt: { count: jest.fn(), findFirst: jest.fn() },
+      contestSessionAnswer: { findFirst: jest.fn() },
+      forumPost: { findFirst: jest.fn() },
+      adminMessage: { create: jest.fn() },
+      $queryRaw: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -124,6 +132,10 @@ describe('AdminUsersService', () => {
         _count: { attempts: 12, contestSessions: 2, posts: 3 },
       });
       prisma.exerciseAttempt.count.mockResolvedValue(7);
+      prisma.exerciseAttempt.findFirst.mockResolvedValue(null);
+      prisma.contestSessionAnswer.findFirst.mockResolvedValue(null);
+      prisma.forumPost.findFirst.mockResolvedValue(null);
+      prisma.$queryRaw.mockResolvedValue([]);
 
       const result = await service.findOne('user-1');
 
@@ -133,6 +145,88 @@ describe('AdminUsersService', () => {
       expect(result).not.toHaveProperty('passwordHash');
       expect(result.exercisesAttempted).toBe(12);
       expect(result.exercisesSolved).toBe(7);
+    });
+
+    it('returns null lastActivityAt when the student has no dated activity', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        ...student,
+        passwordHash: 'hashed',
+        _count: { attempts: 0, contestSessions: 0, posts: 0 },
+      });
+      prisma.exerciseAttempt.count.mockResolvedValue(0);
+      prisma.exerciseAttempt.findFirst.mockResolvedValue(null);
+      prisma.contestSessionAnswer.findFirst.mockResolvedValue(null);
+      prisma.forumPost.findFirst.mockResolvedValue(null);
+      prisma.$queryRaw.mockResolvedValue([]);
+
+      const result = await service.findOne('user-1');
+
+      expect(result.lastActivityAt).toBeNull();
+      expect(result.xpProgression).toEqual([]);
+    });
+
+    it('picks the most recent timestamp across exercises/contests/forum for lastActivityAt', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        ...student,
+        passwordHash: 'hashed',
+        _count: { attempts: 1, contestSessions: 1, posts: 1 },
+      });
+      prisma.exerciseAttempt.count.mockResolvedValue(1);
+      prisma.exerciseAttempt.findFirst.mockResolvedValue({
+        createdAt: new Date('2026-07-01T00:00:00Z'),
+      });
+      prisma.contestSessionAnswer.findFirst.mockResolvedValue({
+        answeredAt: new Date('2026-07-29T12:00:00Z'), // most recent
+      });
+      prisma.forumPost.findFirst.mockResolvedValue({
+        createdAt: new Date('2026-06-15T00:00:00Z'),
+      });
+      prisma.$queryRaw.mockResolvedValue([]);
+
+      const result = await service.findOne('user-1');
+
+      expect(result.lastActivityAt).toEqual(
+        new Date('2026-07-29T12:00:00Z'),
+      );
+    });
+  });
+
+  describe('sendMessage', () => {
+    it('throws NotFoundException for an unknown user', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+      await expect(
+        service.sendMessage('missing', 'admin-1', {
+          subject: 'Salut',
+          message: 'Continue comme ça !',
+        }),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('persists the message from the admin to the student', async () => {
+      prisma.user.findUnique.mockResolvedValue(student);
+      prisma.adminMessage.create.mockResolvedValue({
+        id: 'msg-1',
+        subject: 'Salut',
+        message: 'Continue comme ça !',
+        createdAt: new Date('2026-07-30T00:00:00Z'),
+      });
+
+      const result = await service.sendMessage('user-1', 'admin-1', {
+        subject: 'Salut',
+        message: 'Continue comme ça !',
+      });
+
+      expect(prisma.adminMessage.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: {
+            userId: 'user-1',
+            adminId: 'admin-1',
+            subject: 'Salut',
+            message: 'Continue comme ça !',
+          },
+        }),
+      );
+      expect(result.id).toBe('msg-1');
     });
   });
 

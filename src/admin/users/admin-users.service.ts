@@ -4,11 +4,13 @@ import {
   BadRequestException,
   ForbiddenException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
   UpdateUserDto,
   UpdateUserStatusDto,
   UpdateUserRoleDto,
+  SendMessageDto,
 } from './dto/admin-user.dto';
 
 @Injectable()
@@ -88,9 +90,14 @@ export class AdminUsersService {
     });
     if (!user) throw new NotFoundException('User not found');
 
-    const exercisesSolved = await this.prisma.exerciseAttempt.count({
-      where: { userId: id, isCorrect: true },
-    });
+    const [exercisesSolved, lastActivityAt, xpProgression] =
+      await Promise.all([
+        this.prisma.exerciseAttempt.count({
+          where: { userId: id, isCorrect: true },
+        }),
+        this.getLastActivityAt(id),
+        this.getXpProgression(id),
+      ]);
 
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { passwordHash, ...safe } = user;
@@ -98,7 +105,80 @@ export class AdminUsersService {
       ...safe,
       exercisesAttempted: user._count.attempts,
       exercisesSolved,
+      lastActivityAt,
+      xpProgression,
     };
+  }
+
+  // Most recent timestamp across the (dated) activity sources we track:
+  // exercise attempts, contest QCM answers, forum posts. No dedicated
+  // "last seen" column on User — computed on demand since this is only
+  // read one user at a time, from the admin detail panel.
+  private async getLastActivityAt(userId: string): Promise<Date | null> {
+    const [lastAttempt, lastContestAnswer, lastPost] = await Promise.all([
+      this.prisma.exerciseAttempt.findFirst({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+        select: { createdAt: true },
+      }),
+      this.prisma.contestSessionAnswer.findFirst({
+        where: { session: { userId } },
+        orderBy: { answeredAt: 'desc' },
+        select: { answeredAt: true },
+      }),
+      this.prisma.forumPost.findFirst({
+        where: { authorId: userId },
+        orderBy: { createdAt: 'desc' },
+        select: { createdAt: true },
+      }),
+    ]);
+
+    const dates = [
+      lastAttempt?.createdAt,
+      lastContestAnswer?.answeredAt,
+      lastPost?.createdAt,
+    ].filter((d): d is Date => d != null);
+
+    if (dates.length === 0) return null;
+    return new Date(Math.max(...dates.map((d) => d.getTime())));
+  }
+
+  // Cumulative XP by month for the last 12 months, for the "Progression
+  // XP" chart. Only sources with a timestamp are included (exercise
+  // attempts + contest QCM answers) — forum/daily-mission bonus XP is
+  // added straight to xpTotal with no dated ledger (same limitation noted
+  // on the leaderboard's weekly/monthly view), so this slightly undercounts
+  // versus the student's live xpTotal shown elsewhere on the panel.
+  private async getXpProgression(
+    userId: string,
+  ): Promise<Array<{ month: string; xp: number }>> {
+    const rows = await this.prisma.$queryRaw<
+      Array<{ month: string; xp: bigint | number }>
+    >(Prisma.sql`
+      WITH months AS (
+        SELECT date_trunc('month', now()) - (n || ' months')::interval AS month_start
+        FROM generate_series(11, 0, -1) AS n
+      ),
+      dated_xp AS (
+        SELECT "createdAt" AS ts, "xpEarned" AS xp
+        FROM exercise_attempts WHERE "userId" = ${userId}
+        UNION ALL
+        SELECT csa."answeredAt" AS ts, csa."xpEarned" AS xp
+        FROM contest_session_answers csa
+        JOIN contest_sessions cs ON cs.id = csa."sessionId"
+        WHERE cs."userId" = ${userId}
+      )
+      SELECT
+        to_char(m.month_start, 'YYYY-MM') AS month,
+        COALESCE(
+          (SELECT SUM(xp) FROM dated_xp WHERE ts < m.month_start + interval '1 month'),
+          0
+        ) AS xp
+      FROM months m
+      ORDER BY m.month_start ASC
+    `);
+
+    return rows.map((r) => ({ month: r.month, xp: Number(r.xp) }));
   }
 
   // 9.3.1 — Update user info
@@ -157,6 +237,22 @@ export class AdminUsersService {
       where: { id },
       data: { role: dto.role as any },
       select: { id: true, nom: true, prenom: true, email: true, role: true },
+    });
+  }
+
+  // 9.3.4 — Send a one-off message from an admin to a student (persisted,
+  // no reply/thread UI — that's separate future work if it's ever needed).
+  async sendMessage(id: string, adminId: string, dto: SendMessageDto) {
+    const user = await this.prisma.user.findUnique({ where: { id } });
+    if (!user) throw new NotFoundException('User not found');
+    return this.prisma.adminMessage.create({
+      data: {
+        userId: id,
+        adminId,
+        subject: dto.subject,
+        message: dto.message,
+      },
+      select: { id: true, subject: true, message: true, createdAt: true },
     });
   }
 }

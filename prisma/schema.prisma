@@ -95,11 +95,31 @@ model User {
   likes           ForumLike[]
   resetTokens        PasswordResetToken[]
   verificationTokens EmailVerificationToken[]
+  messagesReceived AdminMessage[] @relation("MessageRecipient")
+  messagesSent     AdminMessage[] @relation("MessageSender")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@map("users")
+}
+
+// A one-off message sent by an admin to a student from the "Détail
+// étudiant" panel (Envoyer message). Simple persisted inbox entry — no
+// threading/replies, that's out of scope for this feature.
+model AdminMessage {
+  id      String @id @default(uuid())
+  userId  String
+  user    User   @relation("MessageRecipient", fields: [userId], references: [id], onDelete: Cascade)
+  adminId String
+  admin   User   @relation("MessageSender", fields: [adminId], references: [id], onDelete: Cascade)
+  subject String
+  message String    @db.Text
+  readAt  DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@map("admin_messages")
 }
 
 model Exercise {
