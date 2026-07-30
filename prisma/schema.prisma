@@ -18,12 +18,14 @@ enum UserStatus {
   BANNED
 }
 
+// Filières des classes préparatoires (Tunisie) : Maths-Physique,
+// Physique-Technologie, Physique-Chimie, Biologie-Géologie — alignées sur
+// les 4 filières utilisées par les IPEs (ex. ipeis.rnu.tn/.../Sujets-et-corrections).
 enum Filiere {
   MP
+  PT
   PC
-  TSI
-  BIO
-  TECHNO
+  BG
 }
 
 enum Matiere {

@@ -238,21 +238,21 @@ describe('UsersService', () => {
       prisma.user.update.mockResolvedValue({
         ...baseUser,
         ecole: 'IPEIS',
-        filiere: 'BIO',
+        filiere: 'BG',
       });
 
       const result = await service.updateProfile('user-1', {
         ecole: 'IPEIS',
-        filiere: 'BIO',
+        filiere: 'BG',
       });
 
       expect(prisma.user.update).toHaveBeenCalledWith({
         where: { id: 'user-1' },
-        data: { ecole: 'IPEIS', filiere: 'BIO' },
+        data: { ecole: 'IPEIS', filiere: 'BG' },
         select: expect.any(Object),
       });
       expect(result.ecole).toBe('IPEIS');
-      expect(result.filiere).toBe('BIO');
+      expect(result.filiere).toBe('BG');
     });
 
     it('sends an empty data payload when nothing is provided', async () => {

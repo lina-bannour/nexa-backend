@@ -5,7 +5,7 @@ export class CreateUserDto {
   @IsNotEmpty()
   nom: string;
 
-  @IsIn(['MP', 'PC', 'TSI', 'BIO', 'TECHNO'])
+  @IsIn(['MP', 'PT', 'PC', 'BG'])
   filiere: string;
 
   @IsInt()

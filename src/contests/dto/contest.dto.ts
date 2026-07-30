@@ -26,7 +26,7 @@ export class CreateContestQuestionDto {
 export class CreateContestDto {
   @IsString() @IsNotEmpty() titre: string;
   @IsInt() annee: number;
-  @IsIn(['MP', 'PC', 'TSI', 'BIO', 'TECHNO']) filiere: string;
+  @IsIn(['MP', 'PT', 'PC', 'BG']) filiere: string;
   @IsOptional() @IsIn(['MATHEMATIQUES', 'PHYSIQUE', 'SCIENCES_INGENIEUR', 'AUTRE'])
   matiere?: string;
   @IsArray() @ValidateNested({ each: true }) @Type(() => CreateContestQuestionDto)

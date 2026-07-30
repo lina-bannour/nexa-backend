@@ -7,6 +7,6 @@ export class UpdateProfileDto {
   ecole?: string;
 
   @IsOptional()
-  @IsIn(['MP', 'PC', 'TSI', 'BIO', 'TECHNO'])
+  @IsIn(['MP', 'PT', 'PC', 'BG'])
   filiere?: string;
 }

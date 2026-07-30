@@ -57,7 +57,7 @@ export class UpdateContestQuestionDto {
 export class UpdateContestDto {
   @IsOptional() @IsString() @IsNotEmpty() titre?: string;
   @IsOptional() @IsInt() annee?: number;
-  @IsOptional() @IsIn(['MP', 'PC', 'TSI', 'BIO', 'TECHNO']) filiere?: string;
+  @IsOptional() @IsIn(['MP', 'PT', 'PC', 'BG']) filiere?: string;
   @IsOptional() @IsIn(['MATHEMATIQUES', 'PHYSIQUE', 'SCIENCES_INGENIEUR', 'AUTRE']) matiere?: string;
   // When provided, replaces the entire question set for this contest.
   @IsOptional()
