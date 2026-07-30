@@ -1,0 +1,44 @@
+diff --git a/src/exercises/exercises.service.ts b/src/exercises/exercises.service.ts
+index ef15e9d..e7e8a07 100644
+--- a/src/exercises/exercises.service.ts
++++ b/src/exercises/exercises.service.ts
+@@ -125,18 +125,28 @@ export class ExercisesService {
+     const selectedChoice = exercise.choix.find((c) => c.id === dto.choiceId);
+     if (!selectedChoice) throw new BadRequestException('Invalid choice');
+ 
+-    // Calculate XP with hint penalty (configurable via /admin/settings — feature 12.2)
+-    const penalties = await this.getHintPenalties();
+-    const penaltyPercent =
+-      penalties[dto.hintsUsed] ?? penalties[penalties.length - 1];
+     const isCorrect = selectedChoice.isCorrect;
+-    // A zero-hint correct answer also earns the configurable "direct
+-    // answer" bonus, on top of the exercise's own XP barème.
+-    const directBonus =
+-      isCorrect && dto.hintsUsed === 0 ? await this.getDirectAnswerBonus() : 0;
+-    const xpEarned = isCorrect
+-      ? Math.floor(exercise.xpBase * (1 - penaltyPercent / 100)) + directBonus
+-      : 0;
++
++    // Reaching the QCM after burning through all 4 hints is now a distinct,
++    // low-stakes path: a correct answer earns a flat 1 XP instead of the
++    // usual xpBase - penalty% calculation, and a wrong one still earns 0.
++    const allHintsUsed = dto.hintsUsed >= 4;
++    let xpEarned: number;
++    if (allHintsUsed) {
++      xpEarned = isCorrect ? 1 : 0;
++    } else {
++      // Calculate XP with hint penalty (configurable via /admin/settings — feature 12.2)
++      const penalties = await this.getHintPenalties();
++      const penaltyPercent =
++        penalties[dto.hintsUsed] ?? penalties[penalties.length - 1];
++      // A zero-hint correct answer also earns the configurable "direct
++      // answer" bonus, on top of the exercise's own XP barème.
++      const directBonus =
++        isCorrect && dto.hintsUsed === 0 ? await this.getDirectAnswerBonus() : 0;
++      xpEarned = isCorrect
++        ? Math.floor(exercise.xpBase * (1 - penaltyPercent / 100)) + directBonus
++        : 0;
++    }
+ 
+     // Save attempt
+     await this.prisma.exerciseAttempt.create({
