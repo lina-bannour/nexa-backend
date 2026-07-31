@@ -1,19 +1,19 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 
-interface MatiereBreakdown {
+export interface MatiereBreakdown {
   matiere: string;
   total: number;
   successRate: number;
 }
 
-interface DifficulteBreakdown {
+export interface DifficulteBreakdown {
   difficulte: string;
   total: number;
   successRate: number;
 }
 
-interface HardestExercise {
+export interface HardestExercise {
   id: string;
   titre: string;
   matiere: string;
@@ -22,13 +22,13 @@ interface HardestExercise {
   successRate: number;
 }
 
-interface FiliereSessions {
+export interface FiliereSessions {
   filiere: string;
   sessions: number;
   avgXp: number;
 }
 
-interface StreakBucket {
+export interface StreakBucket {
   bucket: string;
   count: number;
 }

@@ -7,6 +7,7 @@ describe('UsersController', () => {
   let usersService: {
     getProfile: jest.Mock;
     updateProfile: jest.Mock;
+    changePassword: jest.Mock;
     getLeaderboard: jest.Mock;
     getMyRank: jest.Mock;
   };
@@ -17,6 +18,7 @@ describe('UsersController', () => {
     usersService = {
       getProfile: jest.fn(),
       updateProfile: jest.fn(),
+      changePassword: jest.fn(),
       getLeaderboard: jest.fn(),
       getMyRank: jest.fn(),
     };
@@ -54,6 +56,18 @@ describe('UsersController', () => {
       ecole: 'IPEIT',
     });
     expect(result).toEqual({ id: 'user-1', ecole: 'IPEIT' });
+  });
+
+  it('changePassword delegates to the service with the authenticated user id and dto', async () => {
+    usersService.changePassword.mockResolvedValue({
+      message: 'Mot de passe modifié avec succès.',
+    });
+
+    const dto = { currentPassword: 'ancien', newPassword: 'nouveau1' };
+    const result = await controller.changePassword(req, dto);
+
+    expect(usersService.changePassword).toHaveBeenCalledWith('user-1', dto);
+    expect(result).toEqual({ message: 'Mot de passe modifié avec succès.' });
   });
 
   it('getLeaderboard forwards the optional filiere query param with the default global period', async () => {

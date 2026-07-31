@@ -1,7 +1,13 @@
-import { Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
+import * as bcrypt from 'bcrypt';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 
 type RankedUser = {
   id: string;
@@ -52,6 +58,8 @@ export class UsersService {
     return this.prisma.user.update({
       where: { id: userId },
       data: {
+        ...(dto.nom !== undefined && { nom: dto.nom }),
+        ...(dto.prenom !== undefined && { prenom: dto.prenom }),
         ...(dto.ecole !== undefined && { ecole: dto.ecole }),
         ...(dto.filiere !== undefined && { filiere: dto.filiere as any }),
       },
@@ -67,6 +75,29 @@ export class UsersService {
         createdAt: true,
       },
     });
+  }
+
+  // Changement de mot de passe depuis le compte (utilisateur déjà
+  // authentifié) — distinct du flux "mot de passe oublié" par email/code
+  // dans AuthService. Exige le mot de passe actuel pour confirmer l'identité.
+  async changePassword(userId: string, dto: ChangePasswordDto) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new UnauthorizedException();
+    }
+
+    const valid = await bcrypt.compare(dto.currentPassword, user.passwordHash);
+    if (!valid) {
+      throw new BadRequestException('Mot de passe actuel incorrect.');
+    }
+
+    const passwordHash = await bcrypt.hash(dto.newPassword, 10);
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { passwordHash },
+    });
+
+    return { message: 'Mot de passe modifié avec succès.' };
   }
 
   private getPeriodStart(period: string): Date | null {

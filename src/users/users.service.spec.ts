@@ -1,4 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { BadRequestException, UnauthorizedException } from '@nestjs/common';
+import * as bcrypt from 'bcrypt';
 import { UsersService } from './users.service';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -265,6 +267,75 @@ describe('UsersService', () => {
         data: {},
         select: expect.any(Object),
       });
+    });
+
+    it('updates nom and prénom when provided', async () => {
+      prisma.user.update.mockResolvedValue({
+        ...baseUser,
+        nom: 'Bannour',
+        prenom: 'Amine',
+      });
+
+      await service.updateProfile('user-1', {
+        nom: 'Bannour',
+        prenom: 'Amine',
+      });
+
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'user-1' },
+        data: { nom: 'Bannour', prenom: 'Amine' },
+        select: expect.any(Object),
+      });
+    });
+  });
+
+  // Changement de mot de passe depuis le compte connecté
+  describe('changePassword', () => {
+    it('rejects when the current password does not match', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        ...baseUser,
+        passwordHash: await bcrypt.hash('bonMotDePasse', 10),
+      });
+
+      await expect(
+        service.changePassword('user-1', {
+          currentPassword: 'mauvaisMotDePasse',
+          newPassword: 'nouveauMotDePasse',
+        }),
+      ).rejects.toThrow(BadRequestException);
+      expect(prisma.user.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects when the user cannot be found', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.changePassword('user-1', {
+          currentPassword: 'x',
+          newPassword: 'nouveauMotDePasse',
+        }),
+      ).rejects.toThrow(UnauthorizedException);
+    });
+
+    it('hashes and saves the new password when the current one is correct', async () => {
+      prisma.user.findUnique.mockResolvedValue({
+        ...baseUser,
+        passwordHash: await bcrypt.hash('bonMotDePasse', 10),
+      });
+      prisma.user.update.mockResolvedValue({ ...baseUser });
+
+      const result = await service.changePassword('user-1', {
+        currentPassword: 'bonMotDePasse',
+        newPassword: 'nouveauMotDePasse',
+      });
+
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'user-1' },
+        data: { passwordHash: expect.any(String) },
+      });
+      const savedHash = prisma.user.update.mock.calls[0][0].data.passwordHash;
+      expect(await bcrypt.compare('nouveauMotDePasse', savedHash)).toBe(true);
+      expect(result).toEqual({ message: expect.any(String) });
     });
   });
 

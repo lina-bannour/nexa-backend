@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Put,
+  Patch,
   Body,
   Query,
   UseGuards,
@@ -9,6 +10,7 @@ import {
 } from '@nestjs/common';
 import { UsersService } from './users.service';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
 @Controller('users')
@@ -25,6 +27,14 @@ export class UsersController {
   @Put('me')
   updateProfile(@Request() req: any, @Body() dto: UpdateProfileDto) {
     return this.usersService.updateProfile(req.user.userId, dto);
+  }
+
+  // Changement de mot de passe depuis le compte connecté (nécessite le mot
+  // de passe actuel) — distinct du flux "mot de passe oublié" de AuthController.
+  @UseGuards(JwtAuthGuard)
+  @Patch('me/password')
+  changePassword(@Request() req: any, @Body() dto: ChangePasswordDto) {
+    return this.usersService.changePassword(req.user.userId, dto);
   }
 
   // "Missions du jour" on the profile screen — distinct from the lifetime
